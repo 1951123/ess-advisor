@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
+from math import isfinite
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 def parse_fraction(value: Any) -> Fraction:
@@ -19,7 +21,7 @@ def parse_fraction(value: Any) -> Fraction:
     if isinstance(value, int):
         return Fraction(value)
     if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
+        if not isfinite(value):
             raise ValueError("numeric value must be finite")
         return Fraction(str(value))
     if isinstance(value, str):
@@ -86,8 +88,7 @@ class Task:
             raise ValueError("task candidate references must be unique")
         object.__setattr__(self, "eligible_candidates", eligible)
         corrections = {
-            str(key): parse_fraction(value)
-            for key, value in self.corrections.items()
+            str(key): parse_fraction(value) for key, value in self.corrections.items()
         }
         if set(corrections) != set(eligible):
             raise ValueError(
@@ -200,8 +201,7 @@ def instance_from_dict(data: Mapping[str, Any]) -> Instance:
             alpha=parse_fraction(item["alpha"]),
             eligible_candidates=tuple(item["eligible_candidates"]),
             corrections={
-                key: parse_fraction(value)
-                for key, value in item["corrections"].items()
+                key: parse_fraction(value) for key, value in item["corrections"].items()
             },
         )
         for item in data["tasks"]
@@ -218,12 +218,15 @@ def write_instance(path: str | os.PathLike[str], instance: Instance) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
-    payload = json.dumps(
-        instance_to_dict(instance),
-        indent=2,
-        sort_keys=True,
-        ensure_ascii=False,
-    ) + "\n"
+    payload = (
+        json.dumps(
+            instance_to_dict(instance),
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
     temporary.write_text(payload, encoding="utf-8")
     os.replace(temporary, target)
 

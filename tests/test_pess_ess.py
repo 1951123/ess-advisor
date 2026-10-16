@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 from itertools import combinations
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,18 +10,21 @@ from pess_ess.generate import generate_instance
 from pess_ess.matchings import (
     enumerate_matchings,
     enumerate_maximal_matchings,
-    is_matching,
     is_maximal,
 )
+from pess_ess.mip import solve_binary_milp
 from pess_ess.model import Candidate, Instance, Task, instance_to_dict
 from pess_ess.oracle import evaluate_task, inner_bounds
 from pess_ess.reference import reference_objective, solve_exhaustive
 from pess_ess.solvers import solve_master_oracle, solve_static
+from pess_ess.validation import validate_outer_solution, validate_task_witness
 
 
 def make_instance(
     candidates: tuple[Candidate, ...],
-    task_specs: tuple[tuple[str, Fraction, Fraction, tuple[str, ...], dict[str, Fraction]], ...],
+    task_specs: tuple[
+        tuple[str, Fraction, Fraction, tuple[str, ...], dict[str, Fraction]], ...
+    ],
     budget: Fraction,
 ) -> Instance:
     tasks = tuple(
@@ -50,7 +54,15 @@ def two_disjoint_instance(alpha: int = 1, b: int = 0, budget: int = 1) -> Instan
     candidates = (edge("e", ("a", "b")), edge("f", ("c", "d")))
     return make_instance(
         candidates,
-        (("i", Fraction(1), Fraction(alpha), ("e", "f"), {"e": Fraction(b), "f": Fraction(b)}),),
+        (
+            (
+                "i",
+                Fraction(1),
+                Fraction(alpha),
+                ("e", "f"),
+                {"e": Fraction(b), "f": Fraction(b)},
+            ),
+        ),
         Fraction(budget),
     )
 
@@ -108,7 +120,15 @@ def test_parallel_labeled_edges_are_distinct_and_conflicting() -> None:
     assert frozenset({"e2"}) in matchings
     instance = make_instance(
         candidates,
-        (("i", Fraction(1), Fraction(0), ("e1", "e2"), {"e1": Fraction(1), "e2": Fraction(-2)}),),
+        (
+            (
+                "i",
+                Fraction(1),
+                Fraction(0),
+                ("e1", "e2"),
+                {"e1": Fraction(1), "e2": Fraction(-2)},
+            ),
+        ),
         Fraction(1),
     )
     result = solve_master_oracle(instance)
@@ -130,17 +150,20 @@ def test_delta_equivalence_for_seeded_random_instances() -> None:
         candidate_map = instance.candidate_map
         for task in instance.tasks:
             endpoints = {
-                item: candidate_map[item].endpoints
-                for item in task.eligible_candidates
+                item: candidate_map[item].endpoints for item in task.eligible_candidates
             }
             for size in range(len(instance.candidate_ids) + 1):
                 for selected_tuple in combinations(instance.candidate_ids, size):
                     selected = frozenset(selected_tuple)
                     eligible = selected & set(task.eligible_candidates)
-                    for matching in enumerate_matchings(task.eligible_candidates, endpoints):
-                        occupied = set().union(
-                            *(set(endpoints[item]) for item in matching)
-                        ) if matching else set()
+                    for matching in enumerate_matchings(
+                        task.eligible_candidates, endpoints
+                    ):
+                        occupied = (
+                            set().union(*(set(endpoints[item]) for item in matching))
+                            if matching
+                            else set()
+                        )
                         disjoint = {
                             item
                             for item in task.eligible_candidates
@@ -168,8 +191,7 @@ def test_oracle_matches_independent_reference_on_all_small_selections() -> None:
                 expected, details = reference_objective(instance, selected)
                 actual = sum(
                     (
-                        task.weight
-                        * evaluate_task(instance, task, selected).value
+                        task.weight * evaluate_task(instance, task, selected).value
                         for task in instance.tasks
                     ),
                     Fraction(),
@@ -236,12 +258,28 @@ def test_positive_lp_gap_examples_from_theory_note() -> None:
 def test_sign_coherent_empty_selection_is_optimal() -> None:
     positive = make_instance(
         (edge("e", ("a", "b")), edge("f", ("c", "d"))),
-        (("i", Fraction(1), Fraction(2), ("e", "f"), {"e": Fraction(1), "f": Fraction(3)}),),
+        (
+            (
+                "i",
+                Fraction(1),
+                Fraction(2),
+                ("e", "f"),
+                {"e": Fraction(1), "f": Fraction(3)},
+            ),
+        ),
         Fraction(2),
     )
     negative = make_instance(
         (edge("e", ("a", "b")), edge("f", ("c", "d"))),
-        (("i", Fraction(1), Fraction(-2), ("e", "f"), {"e": Fraction(-1), "f": Fraction(-3)}),),
+        (
+            (
+                "i",
+                Fraction(1),
+                Fraction(-2),
+                ("e", "f"),
+                {"e": Fraction(-1), "f": Fraction(-3)},
+            ),
+        ),
         Fraction(2),
     )
     assert solve_exhaustive(positive).optimal_sets == (frozenset(),)
@@ -251,7 +289,15 @@ def test_sign_coherent_empty_selection_is_optimal() -> None:
 def test_nonmonotone_pessimistic_objective_and_conditional_invalidity() -> None:
     instance = make_instance(
         (edge("e", ("a", "b")), edge("f", ("b", "c"))),
-        (("i", Fraction(1), Fraction(-1), ("e", "f"), {"e": Fraction(1), "f": Fraction(-1)}),),
+        (
+            (
+                "i",
+                Fraction(1),
+                Fraction(-1),
+                ("e", "f"),
+                {"e": Fraction(1), "f": Fraction(-1)},
+            ),
+        ),
         Fraction(2),
     )
     empty, _ = reference_objective(instance, frozenset())
@@ -277,3 +323,134 @@ def test_serialization_is_deterministic_and_exact() -> None:
         for task in first["tasks"]
         for value in [task["weight"], task["alpha"], *task["corrections"].values()]
     )
+
+
+def test_mip_result_separates_primal_dual_and_records_presolve_retry() -> None:
+    responses = iter(
+        (
+            SimpleNamespace(
+                status=4,
+                message="presolve diagnostic failure",
+                fun=9.0,
+                x=[1.0],
+                mip_dual_bound=2.0,
+                mip_gap=3.5,
+                mip_node_count=4,
+            ),
+            SimpleNamespace(
+                status=0,
+                message="retry optimal",
+                fun=4.0,
+                x=[0.0],
+                mip_dual_bound=4.0,
+                mip_gap=0.0,
+                mip_node_count=5,
+            ),
+        )
+    )
+    options_seen = []
+
+    def fake_runner(**kwargs):
+        options_seen.append(kwargs["options"])
+        return next(responses)
+
+    result = solve_binary_milp(
+        objective=(1.0,),
+        integrality=(1,),
+        lower_bounds=(0.0,),
+        upper_bounds=(1.0,),
+        rows=[],
+        solver_runner=fake_runner,
+    )
+    assert result.highs_invocations == 2
+    assert result.presolve_fallback_attempted
+    assert result.presolve_fallback_successes == 1
+    assert result.initial_attempt.status == 4
+    assert result.retry_attempt is not None
+    assert result.selected_attempt == "retry"
+    assert result.primal_objective == 4.0
+    assert result.dual_bound == 4.0
+    assert result.objective == result.primal_objective
+    assert options_seen[1]["presolve"] is False
+
+
+def test_failed_presolve_retry_retains_both_failures() -> None:
+    responses = iter(
+        (
+            SimpleNamespace(status=4, message="first", fun=None, x=None),
+            SimpleNamespace(status=4, message="second", fun=None, x=None),
+        )
+    )
+
+    result = solve_binary_milp(
+        objective=(1.0,),
+        integrality=(1,),
+        lower_bounds=(0.0,),
+        upper_bounds=(1.0,),
+        rows=[],
+        solver_runner=lambda **_: next(responses),
+    )
+    assert result.status == 4
+    assert not result.optimal
+    assert result.retry_attempt is not None
+    assert "initial status 4" in result.message
+    assert "retry status 4" in result.message
+
+
+def test_zero_deadline_prevents_backend_invocation() -> None:
+    calls = []
+    result = solve_binary_milp(
+        objective=(1.0,),
+        integrality=(1,),
+        lower_bounds=(0.0,),
+        upper_bounds=(1.0,),
+        rows=[],
+        time_limit=0.0,
+        solver_runner=lambda **_: calls.append(True),
+    )
+    assert result.status == 1
+    assert result.highs_invocations == 0
+    assert calls == []
+
+
+def test_validation_recomputes_budget_and_witness_loss() -> None:
+    instance = make_instance(
+        (edge("e", ("a", "b"), 2),),
+        (("i", Fraction(1), Fraction(-1), ("e",), {"e": Fraction(2)}),),
+        Fraction(2),
+    )
+    objective, details = reference_objective(instance, frozenset({"e"}))
+    loss, witness = details["i"]
+    validation = validate_outer_solution(
+        instance,
+        frozenset({"e"}),
+        {"i": (loss, witness)},
+    )
+    assert validation.valid
+    assert validation.objective == objective
+    invalid = validate_task_witness(
+        instance,
+        instance.tasks[0],
+        frozenset(),
+        frozenset({"e"}),
+        loss,
+    )
+    assert any("unselected" in error for error in invalid)
+
+
+def test_global_deadline_is_reported_as_nonoptimal() -> None:
+    instance = two_disjoint_instance()
+    result = solve_master_oracle(instance, total_time_limit=0.0)
+    assert result.status == "not_optimal"
+    assert not result.solver_reported_optimal
+
+
+def test_outer_result_exposes_precise_counter_semantics() -> None:
+    instance = two_disjoint_instance(alpha=1, b=1, budget=1)
+    result = solve_master_oracle(instance)
+    assert result.validated_feasible
+    assert result.task_evaluations >= 1
+    assert result.exact_oracle_invocations + result.certified_early_exits >= 1
+    assert result.inner_mip_solve_calls >= result.exact_oracle_invocations
+    assert result.highs_invocations >= result.inner_mip_solve_calls
+    assert result.total_runtime_seconds >= 0.0

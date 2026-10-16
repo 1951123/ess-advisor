@@ -12,17 +12,17 @@ from .solvers import OuterResult, solve_master_oracle, solve_static
 
 __all__ = [
     "Candidate",
-    "Instance",
-    "Task",
-    "read_instance",
-    "write_instance",
     "InnerBounds",
     "InnerOracleResult",
+    "Instance",
+    "OuterResult",
+    "ReferenceResult",
+    "Task",
     "evaluate_task",
     "ordinary_matching_extrema",
-    "ReferenceResult",
+    "read_instance",
     "solve_exhaustive",
-    "OuterResult",
     "solve_master_oracle",
     "solve_static",
+    "write_instance",
 ]

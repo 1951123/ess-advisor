@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import math
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
 from math import lcm
-from typing import Mapping
 
 import networkx as nx
 
 from .matchings import (
-    enumerate_maximal_matchings,
     extend_to_maximal,
-    is_maximal,
     is_matching,
+    is_maximal,
 )
-from .mip import MIPResult, solve_binary_milp
+from .mip import MIPAttempt, MIPResult, solve_binary_milp
 from .model import Instance, Task
 
 
@@ -42,11 +42,40 @@ class InnerOracleResult:
     value: Fraction
     worst_matching: frozenset[str]
     source: str
-    mip_calls: int
     certified_early_exit: bool
     lower_bound: Fraction
     upper_bound: Fraction
     solver_statuses: tuple[MIPResult, ...]
+    ordinary_matching_seconds: float
+    exact_inner_seconds: float
+    task_evaluation_seconds: float
+
+    @property
+    def mip_calls(self) -> int:
+        """Compatibility alias: number of inner MIP optimization calls."""
+        return self.inner_mip_solve_calls
+
+    @property
+    def exact_oracle_invocations(self) -> int:
+        return int(self.source.startswith("mip"))
+
+    @property
+    def inner_mip_solve_calls(self) -> int:
+        return sum(1 for _ in self.solver_statuses)
+
+    @property
+    def highs_invocations(self) -> int:
+        return sum(item.highs_invocations for item in self.solver_statuses)
+
+    @property
+    def presolve_fallback_attempts(self) -> int:
+        return sum(
+            int(item.presolve_fallback_attempted) for item in self.solver_statuses
+        )
+
+    @property
+    def presolve_fallback_successes(self) -> int:
+        return sum(item.presolve_fallback_successes for item in self.solver_statuses)
 
 
 def _scaled_weights(values: Mapping[str, Fraction]) -> dict[str, int]:
@@ -65,7 +94,9 @@ def _networkx_extreme(
 ) -> frozenset[str]:
     if not candidates:
         return frozenset()
-    scaled = _scaled_weights({candidate_id: weights[candidate_id] for candidate_id in candidates})
+    scaled = _scaled_weights(
+        {candidate_id: weights[candidate_id] for candidate_id in candidates}
+    )
     graph = nx.Graph()
     chosen_for_pair: dict[tuple[str, str], str] = {}
     for candidate_id in sorted(candidates):
@@ -74,8 +105,10 @@ def _networkx_extreme(
         if current is None:
             chosen_for_pair[pair] = candidate_id
             continue
-        if (scaled[candidate_id] > scaled[current]) if maximize else (
-            scaled[candidate_id] < scaled[current]
+        if (
+            (scaled[candidate_id] > scaled[current])
+            if maximize
+            else (scaled[candidate_id] < scaled[current])
         ):
             chosen_for_pair[pair] = candidate_id
     for pair, candidate_id in chosen_for_pair.items():
@@ -90,10 +123,7 @@ def _networkx_extreme(
         maxcardinality=False,
         weight="weight",
     )
-    return frozenset(
-        graph.edges[u, v]["candidate_id"]
-        for u, v in result
-    )
+    return frozenset(graph.edges[u, v]["candidate_id"] for u, v in result)
 
 
 def ordinary_matching_extrema(
@@ -102,18 +132,15 @@ def ordinary_matching_extrema(
     candidate_ids: tuple[str, ...] | None = None,
 ) -> MatchingExtrema:
     selected = tuple(
-        sorted(
-            task.eligible_candidates
-            if candidate_ids is None
-            else candidate_ids
-        )
+        sorted(task.eligible_candidates if candidate_ids is None else candidate_ids)
     )
     candidate_map = instance.candidate_map
     endpoints = {
-        candidate_id: candidate_map[candidate_id].endpoints
-        for candidate_id in selected
+        candidate_id: candidate_map[candidate_id].endpoints for candidate_id in selected
     }
-    weights = {candidate_id: task.corrections[candidate_id] for candidate_id in selected}
+    weights = {
+        candidate_id: task.corrections[candidate_id] for candidate_id in selected
+    }
     minimum_matching = _networkx_extreme(selected, endpoints, weights, maximize=False)
     maximum_matching = _networkx_extreme(selected, endpoints, weights, maximize=True)
     minimum_value = sum((weights[item] for item in minimum_matching), Fraction())
@@ -128,8 +155,7 @@ def ordinary_matching_extrema(
 
 def _loss(task: Task, matching: frozenset[str]) -> Fraction:
     return abs(
-        task.alpha
-        + sum((task.corrections[item] for item in matching), Fraction())
+        task.alpha + sum((task.corrections[item] for item in matching), Fraction())
     )
 
 
@@ -210,15 +236,50 @@ def _mip_extreme(
     endpoints: Mapping[str, tuple[str, str]],
     maximize: bool,
     time_limit: float | None,
+    deadline: float | None,
+    clock,
 ) -> tuple[MIPResult, frozenset[str]]:
     if not selected:
+        empty_attempt = MIPAttempt(
+            status=0,
+            message="empty selected graph",
+            primal_objective=0.0,
+            dual_bound=0.0,
+            mip_gap=0.0,
+            mip_node_count=0,
+            values=(),
+            duration_seconds=0.0,
+            invocation_performed=False,
+            presolve=None,
+            incumbent_returned=True,
+            optimality_reported=True,
+        )
         return (
-            MIPResult(0, "empty selected graph", 0.0, (), None, 0),
+            MIPResult(
+                status=0,
+                message="empty selected graph",
+                primal_objective=0.0,
+                dual_bound=0.0,
+                values=(),
+                mip_gap=0.0,
+                mip_node_count=0,
+                initial_attempt=empty_attempt,
+                retry_attempt=None,
+                selected_attempt="initial",
+                total_duration_seconds=0.0,
+                highs_invocations=0,
+                presolve_fallback_attempted=False,
+                presolve_fallback_successes=0,
+            ),
             frozenset(),
         )
     index = {candidate_id: position for position, candidate_id in enumerate(selected)}
     objective = [
-        float(-task.corrections[candidate_id] if maximize else task.corrections[candidate_id])
+        float(
+            -task.corrections[candidate_id]
+            if maximize
+            else task.corrections[candidate_id]
+        )
         for candidate_id in selected
     ]
     rows: list[tuple[dict[int, float], float, float]] = []
@@ -237,10 +298,9 @@ def _mip_extreme(
         coefficients: dict[int, float] = {}
         for other_id in selected:
             if u in endpoints[other_id] or v in endpoints[other_id]:
-                coefficients[index[other_id]] = (
-                    coefficients.get(index[other_id], 0.0)
-                    + (2.0 if other_id == candidate_id else 1.0)
-                )
+                coefficients[index[other_id]] = coefficients.get(
+                    index[other_id], 0.0
+                ) + (2.0 if other_id == candidate_id else 1.0)
         rows.append((coefficients, 1.0, math.inf))
     result = solve_binary_milp(
         objective=objective,
@@ -249,6 +309,8 @@ def _mip_extreme(
         upper_bounds=(1.0 for _ in selected),
         rows=rows,
         time_limit=time_limit,
+        deadline=deadline,
+        clock=clock,
     )
     matching = (
         _extract_matching(result.values, selected, endpoints)
@@ -265,7 +327,11 @@ def exact_maximal_matching_oracle(
     task: Task,
     selected: frozenset[str],
     time_limit: float | None = None,
+    *,
+    deadline: float | None = None,
+    clock=time.perf_counter,
 ) -> InnerOracleResult:
+    started = clock()
     selected_eligible = tuple(
         candidate_id
         for candidate_id in task.eligible_candidates
@@ -273,10 +339,10 @@ def exact_maximal_matching_oracle(
     )
     endpoints = _task_endpoints(instance, task)
     maximum_result, maximum_matching = _mip_extreme(
-        task, selected_eligible, endpoints, True, time_limit
+        task, selected_eligible, endpoints, True, time_limit, deadline, clock
     )
     minimum_result, minimum_matching = _mip_extreme(
-        task, selected_eligible, endpoints, False, time_limit
+        task, selected_eligible, endpoints, False, time_limit, deadline, clock
     )
     statuses = (maximum_result, minimum_result)
     if not all(result.optimal for result in statuses):
@@ -284,11 +350,13 @@ def exact_maximal_matching_oracle(
             value=Fraction(),
             worst_matching=frozenset(),
             source="mip_nonoptimal",
-            mip_calls=2 if selected_eligible else 0,
             certified_early_exit=False,
             lower_bound=Fraction(),
             upper_bound=Fraction(),
             solver_statuses=statuses,
+            ordinary_matching_seconds=0.0,
+            exact_inner_seconds=clock() - started,
+            task_evaluation_seconds=clock() - started,
         )
     maximum_value = sum(
         (task.corrections[item] for item in maximum_matching),
@@ -307,15 +375,18 @@ def exact_maximal_matching_oracle(
         value = negative_side
         worst_matching = minimum_matching
     bounds = inner_bounds(instance, task, selected)
+    exact_elapsed = clock() - started
     return InnerOracleResult(
         value=value,
         worst_matching=worst_matching,
         source="mip",
-        mip_calls=2 if selected_eligible else 0,
         certified_early_exit=False,
         lower_bound=bounds.lower_loss,
         upper_bound=bounds.upper_loss,
         solver_statuses=statuses,
+        ordinary_matching_seconds=0.0,
+        exact_inner_seconds=exact_elapsed,
+        task_evaluation_seconds=exact_elapsed,
     )
 
 
@@ -325,8 +396,14 @@ def evaluate_task(
     selected: frozenset[str],
     time_limit: float | None = None,
     certification_tolerance: float = 0.0,
+    *,
+    deadline: float | None = None,
+    clock=time.perf_counter,
 ) -> InnerOracleResult:
+    started = clock()
+    bounds_started = clock()
     bounds = inner_bounds(instance, task, selected)
+    bounds_elapsed = clock() - bounds_started
     exact_equal = bounds.lower_loss == bounds.upper_loss
     close = math.isclose(
         float(bounds.lower_loss),
@@ -339,15 +416,31 @@ def evaluate_task(
             value=bounds.upper_loss,
             worst_matching=bounds.lower_witness,
             source="certified_bounds",
-            mip_calls=0,
             certified_early_exit=True,
             lower_bound=bounds.lower_loss,
             upper_bound=bounds.upper_loss,
             solver_statuses=(),
+            ordinary_matching_seconds=bounds_elapsed,
+            exact_inner_seconds=0.0,
+            task_evaluation_seconds=clock() - started,
         )
-    return exact_maximal_matching_oracle(
+    result = exact_maximal_matching_oracle(
         instance,
         task,
         selected,
         time_limit=time_limit,
+        deadline=deadline,
+        clock=clock,
+    )
+    return InnerOracleResult(
+        value=result.value,
+        worst_matching=result.worst_matching,
+        source=result.source,
+        certified_early_exit=result.certified_early_exit,
+        lower_bound=result.lower_bound,
+        upper_bound=result.upper_bound,
+        solver_statuses=result.solver_statuses,
+        ordinary_matching_seconds=bounds_elapsed + result.ordinary_matching_seconds,
+        exact_inner_seconds=result.exact_inner_seconds,
+        task_evaluation_seconds=clock() - started,
     )
