@@ -96,7 +96,7 @@ class TaskLocalOracleCache:
     @staticmethod
     def cacheable(result: InnerOracleResult) -> bool:
         if result.source == "certified_bounds":
-            return True
+            return result.lower_bound == result.upper_bound
         return result.source == "mip" and all(
             status.optimal for status in result.solver_statuses
         )

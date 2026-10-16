@@ -512,6 +512,13 @@ def test_unresolved_inner_results_are_not_cacheable() -> None:
     cache = TaskLocalOracleCache()
     unresolved = SimpleNamespace(source="mip_nonoptimal", solver_statuses=())
     assert not cache.cacheable(unresolved)
+    tolerance_only = SimpleNamespace(
+        source="certified_bounds",
+        lower_bound=Fraction(1),
+        upper_bound=Fraction(2),
+        solver_statuses=(),
+    )
+    assert not cache.cacheable(tolerance_only)
 
 
 def test_cache_hits_reuse_valid_witness_without_new_inner_solves() -> None:
