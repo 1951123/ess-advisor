@@ -49,6 +49,7 @@ class InnerOracleResult:
     ordinary_matching_seconds: float
     exact_inner_seconds: float
     task_evaluation_seconds: float
+    ordinary_matching_bound_computations: int = 0
 
     @property
     def mip_calls(self) -> int:
@@ -328,10 +329,13 @@ def exact_maximal_matching_oracle(
     selected: frozenset[str],
     time_limit: float | None = None,
     *,
+    bounds: InnerBounds | None = None,
     deadline: float | None = None,
     clock=time.perf_counter,
 ) -> InnerOracleResult:
     started = clock()
+    ordinary_seconds = 0.0
+    bound_computations = 0
     selected_eligible = tuple(
         candidate_id
         for candidate_id in task.eligible_candidates
@@ -354,9 +358,10 @@ def exact_maximal_matching_oracle(
             lower_bound=Fraction(),
             upper_bound=Fraction(),
             solver_statuses=statuses,
-            ordinary_matching_seconds=0.0,
+            ordinary_matching_seconds=ordinary_seconds,
             exact_inner_seconds=clock() - started,
             task_evaluation_seconds=clock() - started,
+            ordinary_matching_bound_computations=bound_computations,
         )
     maximum_value = sum(
         (task.corrections[item] for item in maximum_matching),
@@ -374,7 +379,11 @@ def exact_maximal_matching_oracle(
     else:
         value = negative_side
         worst_matching = minimum_matching
-    bounds = inner_bounds(instance, task, selected)
+    if bounds is None:
+        bounds_started = clock()
+        bounds = inner_bounds(instance, task, selected)
+        ordinary_seconds = clock() - bounds_started
+        bound_computations = 1
     exact_elapsed = clock() - started
     return InnerOracleResult(
         value=value,
@@ -384,9 +393,10 @@ def exact_maximal_matching_oracle(
         lower_bound=bounds.lower_loss,
         upper_bound=bounds.upper_loss,
         solver_statuses=statuses,
-        ordinary_matching_seconds=0.0,
-        exact_inner_seconds=exact_elapsed,
+        ordinary_matching_seconds=ordinary_seconds,
+        exact_inner_seconds=exact_elapsed - ordinary_seconds,
         task_evaluation_seconds=exact_elapsed,
+        ordinary_matching_bound_computations=bound_computations,
     )
 
 
@@ -397,6 +407,7 @@ def evaluate_task(
     time_limit: float | None = None,
     certification_tolerance: float = 0.0,
     *,
+    reuse_bounds: bool = False,
     deadline: float | None = None,
     clock=time.perf_counter,
 ) -> InnerOracleResult:
@@ -423,12 +434,14 @@ def evaluate_task(
             ordinary_matching_seconds=bounds_elapsed,
             exact_inner_seconds=0.0,
             task_evaluation_seconds=clock() - started,
+            ordinary_matching_bound_computations=1,
         )
     result = exact_maximal_matching_oracle(
         instance,
         task,
         selected,
         time_limit=time_limit,
+        bounds=bounds if reuse_bounds else None,
         deadline=deadline,
         clock=clock,
     )
@@ -443,4 +456,7 @@ def evaluate_task(
         ordinary_matching_seconds=bounds_elapsed + result.ordinary_matching_seconds,
         exact_inner_seconds=result.exact_inner_seconds,
         task_evaluation_seconds=clock() - started,
+        ordinary_matching_bound_computations=(
+            1 + result.ordinary_matching_bound_computations
+        ),
     )

@@ -14,9 +14,14 @@ from pess_ess.matchings import (
 )
 from pess_ess.mip import solve_binary_milp
 from pess_ess.model import Candidate, Instance, Task, instance_to_dict
-from pess_ess.oracle import evaluate_task, inner_bounds
+from pess_ess.oracle import evaluate_task, exact_maximal_matching_oracle, inner_bounds
 from pess_ess.reference import reference_objective, solve_exhaustive
-from pess_ess.solvers import solve_master_oracle, solve_static
+from pess_ess.solvers import (
+    MasterOracleOptions,
+    TaskLocalOracleCache,
+    solve_master_oracle,
+    solve_static,
+)
 from pess_ess.validation import validate_outer_solution, validate_task_witness
 
 
@@ -454,3 +459,95 @@ def test_outer_result_exposes_precise_counter_semantics() -> None:
     assert result.inner_mip_solve_calls >= result.exact_oracle_invocations
     assert result.highs_invocations >= result.inner_mip_solve_calls
     assert result.total_runtime_seconds >= 0.0
+
+
+def test_four_master_oracle_variants_preserve_small_instance_objective() -> None:
+    instance = generate_instance(29, 5, 3, attribute_count=4)
+    reference = solve_exhaustive(instance)
+    variants = (
+        MasterOracleOptions(),
+        MasterOracleOptions(precompute_invariants=True),
+        MasterOracleOptions(task_local_cache=True),
+        MasterOracleOptions(precompute_invariants=True, task_local_cache=True),
+    )
+    results = [solve_master_oracle(instance, options=options) for options in variants]
+    assert all(result.status == "optimal" for result in results)
+    assert all(result.objective == reference.objective for result in results)
+    assert results[0].full_graph_ordinary_matching_extrema_computations >= (
+        results[1].full_graph_ordinary_matching_extrema_computations
+    )
+    assert results[2].cache_hits >= 0
+    assert results[3].cache_hits >= 0
+
+
+def test_task_local_cache_is_scoped_by_task_and_local_selection() -> None:
+    candidates = (edge("e", ("a", "b")), edge("f", ("c", "d")))
+    instance = make_instance(
+        candidates,
+        (
+            ("i0", Fraction(1), Fraction(1), ("e",), {"e": Fraction(0)}),
+            ("i1", Fraction(1), Fraction(1), ("e",), {"e": Fraction(0)}),
+        ),
+        Fraction(1),
+    )
+    cache = TaskLocalOracleCache()
+    result = evaluate_task(instance, instance.tasks[0], frozenset({"e"}))
+    assert cache.put(instance.tasks[0], frozenset({"e"}), result)
+    assert cache.get(instance.tasks[0], frozenset({"e"})) == result
+    assert cache.get(instance.tasks[0], frozenset({"f"})) is None
+    assert cache.get(instance.tasks[1], frozenset({"e"})) is None
+    other = make_instance(
+        (edge("e", ("x", "y")),),
+        (("i0", Fraction(1), Fraction(1), ("e",), {"e": Fraction(0)}),),
+        Fraction(1),
+    )
+    other_result = evaluate_task(other, other.tasks[0], frozenset({"e"}))
+    other_cache = TaskLocalOracleCache()
+    assert other_cache.get(other.tasks[0], frozenset({"e"})) is None
+    assert other_cache.put(other.tasks[0], frozenset({"e"}), other_result)
+    assert other_cache.get(other.tasks[0], frozenset({"e"})) == other_result
+
+
+def test_unresolved_inner_results_are_not_cacheable() -> None:
+    cache = TaskLocalOracleCache()
+    unresolved = SimpleNamespace(source="mip_nonoptimal", solver_statuses=())
+    assert not cache.cacheable(unresolved)
+
+
+def test_cache_hits_reuse_valid_witness_without_new_inner_solves() -> None:
+    instance = generate_instance(31, 5, 3, attribute_count=4)
+    baseline = solve_master_oracle(instance)
+    cached = solve_master_oracle(
+        instance,
+        options=MasterOracleOptions(task_local_cache=True),
+    )
+    assert cached.status == baseline.status == "optimal"
+    assert cached.objective == baseline.objective
+    assert cached.cache_hits > 0
+    assert 0 < cached.cache_entries <= cached.cache_misses
+    assert cached.inner_mip_solve_calls <= baseline.inner_mip_solve_calls
+    assert validate_outer_solution(
+        instance, cached.selected or frozenset(), cached.task_details
+    ).valid
+
+
+def test_precomputed_bounds_are_reused_by_exact_inner_oracle() -> None:
+    instance = generate_instance(7, 5, 3, attribute_count=4)
+    selected = frozenset(instance.candidate_ids)
+    found = False
+    for task in instance.tasks:
+        bounds = inner_bounds(instance, task, selected)
+        exact = exact_maximal_matching_oracle(
+            instance,
+            task,
+            selected,
+            bounds=bounds,
+        )
+        if exact.source == "mip":
+            found = True
+            assert exact.ordinary_matching_bound_computations == 0
+            assert exact.value == evaluate_task(
+                instance, task, selected, reuse_bounds=True
+            ).value
+            break
+    assert found

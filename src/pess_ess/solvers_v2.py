@@ -15,7 +15,7 @@ from fractions import Fraction
 from .matchings import enumerate_matchings
 from .mip import MIPResult, solve_binary_milp
 from .model import Instance, Task
-from .oracle import evaluate_task, ordinary_matching_extrema
+from .oracle import InnerOracleResult, evaluate_task, ordinary_matching_extrema
 from .reference import reference_objective
 from .validation import validate_outer_solution
 
@@ -58,6 +58,67 @@ class OuterResult:
     cut_construction_seconds: float = 0.0
     validation_seconds: float = 0.0
     total_runtime_seconds: float = 0.0
+    invariant_precomputation_seconds: float = 0.0
+    cache_management_seconds: float = 0.0
+    task_evaluation_requests: int = 0
+    task_evaluation_computations: int = 0
+    distinct_task_local_configurations: int = 0
+    cache_lookups: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cache_entries: int = 0
+    cache_hit_rate: float = 0.0
+    full_graph_ordinary_matching_extrema_computations: int = 0
+    task_local_ordinary_matching_bound_computations: int = 0
+
+
+@dataclass(frozen=True)
+class MasterOracleOptions:
+    """Independent switches for the two Master--Oracle optimizations."""
+
+    precompute_invariants: bool = False
+    task_local_cache: bool = False
+
+
+class TaskLocalOracleCache:
+    """Invocation-scoped cache for completed task-local evaluations."""
+
+    def __init__(self) -> None:
+        self._values: dict[
+            tuple[str, frozenset[str]], InnerOracleResult
+        ] = {}
+
+    @staticmethod
+    def key(task: Task, selected: frozenset[str]) -> tuple[str, frozenset[str]]:
+        local = frozenset(selected & set(task.eligible_candidates))
+        return task.id, local
+
+    @staticmethod
+    def cacheable(result: InnerOracleResult) -> bool:
+        if result.source == "certified_bounds":
+            return True
+        return result.source == "mip" and all(
+            status.optimal for status in result.solver_statuses
+        )
+
+    def get(
+        self, task: Task, selected: frozenset[str]
+    ) -> InnerOracleResult | None:
+        return self._values.get(self.key(task, selected))
+
+    def put(
+        self,
+        task: Task,
+        selected: frozenset[str],
+        result: InnerOracleResult,
+    ) -> bool:
+        if not self.cacheable(result):
+            return False
+        self._values[self.key(task, selected)] = result
+        return True
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
 def _floor(instance: Instance, task: Task) -> Fraction:
@@ -110,6 +171,7 @@ def _solve_conditional_master(
     cuts: set[tuple[str, tuple[str, ...]]],
     time_limit: float | None,
     *,
+    lambdas: dict[str, Fraction] | None = None,
     deadline: float | None,
     clock: Callable[[], float],
 ) -> tuple[MIPResult, dict[str, Fraction], float]:
@@ -120,7 +182,8 @@ def _solve_conditional_master(
     z_index = {
         task_id: len(candidate_ids) + index for index, task_id in enumerate(task_ids)
     }
-    lambdas = {task.id: _floor(instance, task) for task in instance.tasks}
+    if lambdas is None:
+        lambdas = {task.id: _floor(instance, task) for task in instance.tasks}
     objective = [0.0] * len(candidate_ids) + [
         float(task.weight) for task in instance.tasks
     ]
@@ -333,10 +396,23 @@ def solve_master_oracle(
     *,
     cut_tolerance: float = 1e-6,
     total_time_limit: float | None = None,
+    options: MasterOracleOptions | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> OuterResult:
+    options = options or MasterOracleOptions()
     started = clock()
     deadline = started + total_time_limit if total_time_limit is not None else None
+    invariant_started = clock()
+    invariant_lambdas = (
+        {task.id: _floor(instance, task) for task in instance.tasks}
+        if options.precompute_invariants
+        else None
+    )
+    invariant_seconds = clock() - invariant_started
+    full_graph_extrema_computations = (
+        len(instance.tasks) if options.precompute_invariants else 0
+    )
+    task_cache = TaskLocalOracleCache() if options.task_local_cache else None
     cuts: set[tuple[str, tuple[str, ...]]] = set()
     solver_statuses: list[MIPResult] = []
     best_selection: frozenset[str] | None = None
@@ -358,12 +434,20 @@ def solve_master_oracle(
     numerical_warnings: list[str] = []
     numerical_violations = 0
     existing_cut_violations = 0
+    task_evaluation_requests = 0
+    task_evaluation_computations = 0
+    distinct_task_local_configurations: set[tuple[str, frozenset[str]]] = set()
+    cache_lookups = 0
+    cache_hits = 0
+    cache_misses = 0
+    cache_management_seconds = 0.0
+    task_local_bound_computations = 0
 
     def metrics() -> dict[str, object]:
         return {
             "certified_early_exits": certified_exits,
             "task_evaluations": task_evaluations,
-            "ordinary_matching_bound_evaluations": task_evaluations,
+            "ordinary_matching_bound_evaluations": task_local_bound_computations,
             "exact_oracle_invocations": exact_oracles,
             "inner_mip_solve_calls": inner_mip_calls,
             "highs_invocations": highs_calls,
@@ -377,6 +461,26 @@ def solve_master_oracle(
             "numerical_warnings": tuple(numerical_warnings),
             "numerical_violation_count": numerical_violations,
             "existing_cut_violation_count": existing_cut_violations,
+            "invariant_precomputation_seconds": invariant_seconds,
+            "cache_management_seconds": cache_management_seconds,
+            "task_evaluation_requests": task_evaluation_requests,
+            "task_evaluation_computations": task_evaluation_computations,
+            "distinct_task_local_configurations": len(
+                distinct_task_local_configurations
+            ),
+            "cache_lookups": cache_lookups,
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
+            "cache_entries": len(task_cache) if task_cache is not None else 0,
+            "cache_hit_rate": (
+                cache_hits / cache_lookups if cache_lookups else 0.0
+            ),
+            "full_graph_ordinary_matching_extrema_computations": (
+                full_graph_extrema_computations
+            ),
+            "task_local_ordinary_matching_bound_computations": (
+                task_local_bound_computations
+            ),
         }
 
     while True:
@@ -401,10 +505,13 @@ def solve_master_oracle(
                 validated_feasible=best_selection is not None,
                 **metrics(),
             )
+        if invariant_lambdas is None:
+            full_graph_extrema_computations += len(instance.tasks)
         result, _lambdas, build_seconds = _solve_conditional_master(
             instance,
             cuts,
             time_limit,
+            lambdas=invariant_lambdas,
             deadline=deadline,
             clock=clock,
         )
@@ -448,24 +555,50 @@ def solve_master_oracle(
         details: dict[str, tuple[Fraction, frozenset[str]]] = {}
         task_index = {task.id: index for index, task in enumerate(instance.tasks)}
         for task in instance.tasks:
-            evaluation = evaluate_task(
-                instance,
-                task,
-                selected,
-                time_limit=inner_time_limit,
-                certification_tolerance=certification_tolerance,
-                deadline=deadline,
-                clock=clock,
-            )
+            task_evaluation_requests += 1
             task_evaluations += 1
-            exact_oracles += evaluation.exact_oracle_invocations
-            inner_mip_calls += evaluation.inner_mip_solve_calls
-            certified_exits += int(evaluation.certified_early_exit)
-            ordinary_seconds += evaluation.ordinary_matching_seconds
-            exact_seconds += evaluation.exact_inner_seconds
-            highs_calls += evaluation.highs_invocations
-            fallback_attempts += evaluation.presolve_fallback_attempts
-            fallback_successes += evaluation.presolve_fallback_successes
+            cache_started = clock()
+            local_key = TaskLocalOracleCache.key(task, selected)
+            distinct_task_local_configurations.add(local_key)
+            cached = None
+            if task_cache is not None:
+                cache_lookups += 1
+                cached = task_cache.get(task, selected)
+                if cached is None:
+                    cache_misses += 1
+                else:
+                    cache_hits += 1
+            cache_management_seconds += clock() - cache_started
+            if cached is not None:
+                evaluation = cached
+            else:
+                evaluation = evaluate_task(
+                    instance,
+                    task,
+                    selected,
+                    time_limit=inner_time_limit,
+                    certification_tolerance=certification_tolerance,
+                    reuse_bounds=options.precompute_invariants,
+                    deadline=deadline,
+                    clock=clock,
+                )
+                task_evaluation_computations += 1
+                task_local_bound_computations += (
+                    evaluation.ordinary_matching_bound_computations
+                )
+                if task_cache is not None:
+                    cache_started = clock()
+                    task_cache.put(task, selected, evaluation)
+                    cache_management_seconds += clock() - cache_started
+            if cached is None:
+                exact_oracles += evaluation.exact_oracle_invocations
+                inner_mip_calls += evaluation.inner_mip_solve_calls
+                certified_exits += int(evaluation.certified_early_exit)
+                ordinary_seconds += evaluation.ordinary_matching_seconds
+                exact_seconds += evaluation.exact_inner_seconds
+                highs_calls += evaluation.highs_invocations
+                fallback_attempts += evaluation.presolve_fallback_attempts
+                fallback_successes += evaluation.presolve_fallback_successes
             if evaluation.source == "mip_nonoptimal":
                 return _empty_result(
                     status="not_optimal",
@@ -481,7 +614,8 @@ def solve_master_oracle(
                     validated_feasible=False,
                     **metrics(),
                 )
-            solver_statuses.extend(evaluation.solver_statuses)
+            if cached is None:
+                solver_statuses.extend(evaluation.solver_statuses)
             details[task.id] = (evaluation.value, evaluation.worst_matching)
             z_value = result.values[len(instance.candidates) + task_index[task.id]]
             violation = float(evaluation.value) - z_value
@@ -590,4 +724,10 @@ def solve_master_oracle(
 
 
 # Preserve the historical import surface for users of this module.
-__all__ = ["OuterResult", "solve_master_oracle", "solve_static"]
+__all__ = [
+    "MasterOracleOptions",
+    "OuterResult",
+    "TaskLocalOracleCache",
+    "solve_master_oracle",
+    "solve_static",
+]
