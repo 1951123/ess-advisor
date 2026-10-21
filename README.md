@@ -25,3 +25,7 @@ It provides an exact Fraction-based exhaustive reference for small instances,
 a static strengthened conditional MILP, and an integer Master--Oracle
 prototype using SciPy optimize.milp with HiGHS. MIP statuses are reported
 explicitly; a time-limited incumbent is never labeled optimal.
+
+## Development workflow
+
+See [agent and worktree instructions](AGENTS.md) for repository-local Codex rules, environment setup, test boundaries and immutable cross-repository dependencies.
