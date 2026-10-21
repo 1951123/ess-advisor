@@ -17,3 +17,10 @@ Applies only to `1951123/ess-advisor`. This repository independently owns adviso
 - Researcher authorization is required for full calibration, expensive PG operations, or official held-out/test evaluation. Agent review and ordinary unit-test permission do not imply experiment approval. Never use held-out outcomes to choose resources.
 - Do not commit `.venv`, raw datasets, generated large experiment products, PostgreSQL binaries, fixed ANALYZE samples, logs or secrets. Preserve compact reproducibility evidence and explicitly report failures/limits.
 - Keep each PR Draft until researcher review; no autonomous merge or destructive worktree cleanup.
+
+
+## Mandatory isolation and durable evidence
+
+**Only original inputs in `ESS_DATA_ROOT` are shared data.** Every Issue has its own development Worktree and own `.venv`; do not import installed packages or derived outputs from another Issue's environment. Any PG-backed experiment builds its own pinned PostgreSQL source/binaries and owns a separate PGDATA and sample; even an identical PG commit is rebuilt rather than borrowed from another experiment. Keep generated files, temporary outputs and test scratch under an owned path in `ESS_RUNTIME_PARENT/ess-advisor/issue<N>/runs/<run-id>/`; do not silently emit them under the main checkout or the source Worktree. Inspect ignored files as well as `git status` before handoff. Codex is responsible for its own build/test debris and may not remove other tasks' files.
+
+Each repository's primary checkout remains on `main`. Runtime directories are disposable and impose no long-term curation burden on the researcher. Version necessary and expensive-to-regenerate scientific observations, experiment configuration and immutable source pins in Git when reasonably sized; do not version bulky binaries, databases or verbose traces. If essential outputs exceed practical Git limits, agree on durable storage **before running**, rather than assuming scratch survives. Preserve historical evidence, migrate active experiments at their next run, and do not infer permission to conduct calibration or held-out tests.
