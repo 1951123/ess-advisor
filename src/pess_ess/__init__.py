@@ -2,6 +2,7 @@
 
 from .api import result_to_dict, solve, solve_payload
 from .model import Candidate, Instance, Task, read_instance, write_instance
+from .nominal import solve_nominal
 from .oracle import (
     InnerBounds,
     InnerOracleResult,
@@ -26,6 +27,7 @@ __all__ = [
     "solve",
     "solve_exhaustive",
     "solve_master_oracle",
+    "solve_nominal",
     "solve_payload",
     "solve_static",
     "write_instance",

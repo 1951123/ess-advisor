@@ -1,4 +1,4 @@
-"""Small PESS-only callable and JSON contract over the existing solvers."""
+"""Callable and JSON contract for supported structured ESS objectives."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from typing import Any, Literal
 import scipy
 
 from .model import Instance, instance_from_dict
+from .nominal import solve_nominal
 from .solvers import OuterResult, solve_master_oracle, solve_static
 
-Backend = Literal["master_oracle", "static"]
+Backend = Literal["master_oracle", "static", "fixed_priority_milp"]
 SCHEMA_VERSION = "1"
 
 
@@ -19,23 +20,28 @@ def solve(
     instance: Instance,
     *,
     objective: str = "pess",
-    backend: Backend = "master_oracle",
+    backend: Backend | None = None,
+    priority_order: list[str] | tuple[str, ...] | None = None,
     time_limit: float | None = None,
     inner_time_limit: float | None = None,
     total_time_limit: float | None = None,
     precompute_invariants: bool = False,
     task_local_cache: bool = False,
 ) -> OuterResult:
-    """Solve the structured task-wise PESS model using a conventional MILP.
+    """Solve a supported structured ESS objective using conventional MILPs.
 
-    The default master-oracle backend does not enumerate outer resource sets.
-    The static backend enumerates complete matching scenarios and is intended
-    for instances where that family remains tractable.
+    PESS defaults to Master--Oracle, which does not enumerate outer resource
+    sets. Nominal uses a complete fixed candidate-priority order shared by all
+    tasks and a direct deterministic-policy MILP.
     """
-    if objective != "pess":
-        raise ValueError("only objective='pess' is supported by this API")
-    if backend not in {"master_oracle", "static"}:
-        raise ValueError("backend must be 'master_oracle' or 'static'")
+    if objective not in {"pess", "nominal"}:
+        raise ValueError("objective must be 'pess' or 'nominal'")
+    if backend is None:
+        backend = "fixed_priority_milp" if objective == "nominal" else "master_oracle"
+    if objective == "pess" and backend not in {"master_oracle", "static"}:
+        raise ValueError("PESS backend must be 'master_oracle' or 'static'")
+    if objective == "nominal" and backend != "fixed_priority_milp":
+        raise ValueError("Nominal backend must be 'fixed_priority_milp'")
     for name, limit in (
         ("time_limit", time_limit),
         ("inner_time_limit", inner_time_limit),
@@ -58,6 +64,21 @@ def solve(
             time_limit=time_limit,
             total_time_limit=total_time_limit,
         )
+    if objective == "nominal":
+        if priority_order is None:
+            raise ValueError("objective='nominal' requires priority_order")
+        if inner_time_limit is not None or precompute_invariants or task_local_cache:
+            raise ValueError(
+                "inner_time_limit and master-oracle options apply only to PESS"
+            )
+        return solve_nominal(
+            instance,
+            priority_order,
+            time_limit=time_limit,
+            total_time_limit=total_time_limit,
+        )
+    if priority_order is not None:
+        raise ValueError("priority_order is supported only by objective='nominal'")
     from .solvers import MasterOracleOptions
 
     return solve_master_oracle(
@@ -99,25 +120,86 @@ def result_to_dict(
     *,
     backend: Backend,
     objective: str = "pess",
+    priority_order: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Serialize validated witnesses, numerical status, and provenance."""
+    """Serialize validated objective evidence, numerical status, and provenance."""
+    if objective not in {"pess", "nominal"}:
+        raise ValueError("objective must be 'pess' or 'nominal'")
     selected = sorted(result.selected) if result.selected is not None else None
-    selected_pess_value_certified = bool(
-        result.validated_feasible
+    selected_nominal_value_certified = bool(
+        objective == "nominal"
+        and backend == "fixed_priority_milp"
+        and result.validated_feasible
         and result.objective is not None
-        and (
-            backend == "static" or result.exact_oracle_invocations == 0
-        )
+    )
+    selected_pess_value_certified = bool(
+        objective == "pess"
+        and result.validated_feasible
+        and result.objective is not None
+        and (backend == "static" or result.exact_oracle_invocations == 0)
         and not any(
             "task maximum is not Fraction-certified" in warning
             for warning in result.numerical_warnings
         )
     )
+    selected_value_certified = (
+        selected_nominal_value_certified or selected_pess_value_certified
+    )
     bound_scope = (
         "complete_static_formulation"
         if backend == "static"
-        else "restricted_master_at_termination"
+        else (
+            "complete_fixed_priority_formulation"
+            if backend == "fixed_priority_milp"
+            else "restricted_master_at_termination"
+        )
     )
+    if objective == "nominal":
+        result_priority = result.policy_priority_order
+        if result_priority is None:
+            raise ValueError("Nominal result is missing its policy priority order")
+        if priority_order is not None and tuple(priority_order) != result_priority:
+            raise ValueError("priority_order does not match the solved Nominal policy")
+        priority_order = result_priority
+        objective_evidence = {
+            "selected_nominal_value_fraction_certified": selected_nominal_value_certified,
+            "basis": "fixed_global_priority_greedy_replay",
+            "task_losses_aggregated_with_fraction_arithmetic": True,
+            "priority_order_shared_across_tasks": True,
+        }
+        incumbent_objective_key = "objective_value"
+    else:
+        objective_evidence = {
+            "witness_losses_aggregated_with_fraction_arithmetic": True,
+            "selected_pess_value_fraction_certified": selected_pess_value_certified,
+            "basis": (
+                "complete_fraction_matching_enumeration"
+                if backend == "static"
+                else (
+                    "fraction_certified_inner_bounds"
+                    if result.exact_oracle_invocations == 0
+                    else "witnesses_with_numerical_inner_mip_status"
+                )
+            ),
+            "numerical_inner_oracle_invocations_during_run": (
+                result.exact_oracle_invocations
+            ),
+            "inner_mip_solve_calls": result.inner_mip_solve_calls,
+        }
+        incumbent_objective_key = "witness_aggregate"
+    incumbent = {
+        "available": selected is not None,
+        "validated_feasible": result.validated_feasible,
+        "selected": selected,
+        "maintenance_cost": (
+            str(result.maintenance_cost)
+            if result.maintenance_cost is not None
+            else None
+        ),
+        incumbent_objective_key: (
+            str(result.objective) if result.objective is not None else None
+        ),
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "objective": objective,
@@ -134,48 +216,30 @@ def result_to_dict(
             "lower_bound_scope": bound_scope,
             "lower_bound_is_mathematical_certificate": False,
             "global_incumbent_upper_bound": (
-                str(result.objective) if selected_pess_value_certified else None
+                str(result.objective) if selected_value_certified else None
             ),
-            "global_upper_bound_is_fraction_certified": selected_pess_value_certified,
+            "global_upper_bound_is_fraction_certified": selected_value_certified,
             "mip_gap": (
                 result.master_mip_gap
                 if result.status == "optimal" and result.solver_reported_optimal
-                and selected_pess_value_certified
+                and selected_value_certified
                 and not result.numerical_warnings
                 else None
             ),
             "outer_global_optimum_fraction_certified": False,
         },
-        "incumbent": {
-            "available": selected is not None,
-            "validated_feasible": result.validated_feasible,
-            "selected": selected,
-            "maintenance_cost": (
-                str(result.maintenance_cost)
-                if result.maintenance_cost is not None
-                else None
-            ),
-            "witness_aggregate": (
-                str(result.objective) if result.objective is not None else None
-            ),
-        },
-        "objective_evidence": {
-            "witness_losses_aggregated_with_fraction_arithmetic": True,
-            "selected_pess_value_fraction_certified": selected_pess_value_certified,
-            "basis": (
-                "complete_fraction_matching_enumeration"
-                if backend == "static"
-                else (
-                    "fraction_certified_inner_bounds"
-                    if result.exact_oracle_invocations == 0
-                    else "witnesses_with_numerical_inner_mip_status"
-                )
-            ),
-            "numerical_inner_oracle_invocations_during_run": (
-                result.exact_oracle_invocations
-            ),
-            "inner_mip_solve_calls": result.inner_mip_solve_calls,
-        },
+        "incumbent": incumbent,
+        "objective_evidence": objective_evidence,
+        **(
+            {
+                "policy": {
+                    "kind": "fixed_global_candidate_priority_greedy",
+                    "priority_order": list(priority_order or ()),
+                }
+            }
+            if objective == "nominal"
+            else {}
+        ),
         "solver_statuses": [_solver_status(item) for item in result.solver_statuses],
         "wall_time_seconds": result.total_runtime_seconds,
         "provenance": {
@@ -201,7 +265,8 @@ def solve_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {SCHEMA_VERSION!r}")
     objective = payload.get("objective", "pess")
-    backend = payload.get("backend", "master_oracle")
+    backend = payload.get("backend")
+    priority_order = payload.get("priority_order")
     limits = payload.get("limits", {})
     options = payload.get("options", {})
     provenance = payload.get("input_provenance", {})
@@ -228,12 +293,21 @@ def solve_payload(payload: dict[str, Any]) -> dict[str, Any]:
         instance,
         objective=objective,
         backend=backend,
+        priority_order=priority_order,
         time_limit=limits.get("time_seconds"),
         inner_time_limit=limits.get("inner_time_seconds"),
         total_time_limit=limits.get("total_time_seconds"),
         precompute_invariants=options.get("precompute_invariants", False),
         task_local_cache=options.get("task_local_cache", False),
     )
-    response = result_to_dict(result, objective=objective, backend=backend)
+    resolved_backend: Backend = backend or (
+        "fixed_priority_milp" if objective == "nominal" else "master_oracle"
+    )
+    response = result_to_dict(
+        result,
+        objective=objective,
+        backend=resolved_backend,
+        priority_order=priority_order,
+    )
     response["input_provenance"] = provenance
     return response

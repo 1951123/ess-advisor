@@ -71,6 +71,7 @@ class OuterResult:
     cache_hit_rate: float = 0.0
     full_graph_ordinary_matching_extrema_computations: int = 0
     task_local_ordinary_matching_bound_computations: int = 0
+    policy_priority_order: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)

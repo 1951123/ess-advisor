@@ -1,11 +1,15 @@
-# Structured PESS solver API (schema v1)
+# Structured ESS solver API (schema v1)
 
 ## Scope
 
-This API solves the structured **task-wise PESS** objective. For each task it
-maximizes loss over the admissible maximal matchings, then sums those task
-maxima with positive task weights. It does not implement Nominal or
-Joint-Robust objectives.
+This API solves the structured **task-wise PESS** and fixed-policy
+**Nominal** objectives. It does not implement Joint-Robust. PESS takes
+independent task-wise worst cases over all admissible maximal matchings.
+Nominal uses one explicitly supplied global candidate priority order; for each
+task it scans the selected eligible edges in that order and greedily adds an
+edge when it does not conflict with an earlier selected edge. The order is a
+known policy input shared across tasks, not an advisor decision or a claim
+about PostgreSQL OID order.
 
 The model is deliberately narrower than generic ESS:
 
@@ -32,6 +36,11 @@ from pess_ess import read_instance, solve
 
 instance = read_instance("instance.json")
 result = solve(instance, objective="pess", backend="master_oracle")
+nominal = solve(
+    instance,
+    objective="nominal",
+    priority_order=["ab", "bc", "cd"],
+)
 ```
 
 `backend="master_oracle"` is the default and does not enumerate outer resource
@@ -45,8 +54,12 @@ differential checks, not production selection.
 Supported keyword options are `time_limit` (per MILP call), `inner_time_limit`
 (per inner task oracle; master-oracle only), `total_time_limit` (global wall
 limit), and master-oracle `precompute_invariants` / `task_local_cache`.
-Unsupported objective/backend combinations and negative limits raise
-`ValueError`.
+Nominal requires `priority_order` to be a complete permutation of all
+candidate IDs and uses the `fixed_priority_milp` backend by default. Its
+deterministic matching constraints encode the greedy scan without enumerating
+resource subsets. Unsupported objective/backend combinations, malformed
+priority orders and negative limits raise `ValueError`; priority-order type
+errors raise `TypeError`.
 
 The returned `OuterResult.objective` is the Fraction sum of the reported
 maximal-matching witness losses. Fraction arithmetic makes that witness sum
@@ -61,6 +74,11 @@ Fraction proof of the outer optimum. `feasible_unproven` means the timed
 resource selection and its reported witnesses passed independent feasibility
 validation, while global optimality remains unestablished. Inner solver
 statuses used by a timeout incumbent are included in `solver_statuses`.
+For Nominal, `OuterResult.objective` is the exact Fraction replay of the
+specified priority policy on the selected resource set. The MIP still uses
+floating-point coefficients: `optimal` is solver-reported optimality, not an
+exact proof of the resource-selection optimum. A validated feasible
+nonoptimal incumbent is returned as `feasible_unproven`.
 
 ## JSON command
 
@@ -112,6 +130,14 @@ Request schema v1:
   }
 }
 ```
+
+For Nominal, use `"objective": "nominal"`, omit `backend` (it defaults to
+`fixed_priority_milp`), and add a complete shared order such as
+`"priority_order": ["ab", "bc", "cd"]`. The result echoes this policy under
+`policy.priority_order`; the selected set remains unordered. Nominal's
+`incumbent.objective_value` and Fraction-certified incumbent upper bound are
+recomputed by exact rational replay of that policy. The outer optimality
+status and lower bound remain floating-point solver reports.
 
 Rational values may be JSON strings such as `"-3/2"`, integers, or finite
 decimals; they are parsed as exact `Fraction` model inputs. Omit unsupported

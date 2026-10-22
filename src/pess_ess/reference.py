@@ -104,6 +104,93 @@ def reference_objective(
     return objective, details
 
 
+def reference_nominal_task_loss(
+    instance: Instance,
+    task: Task,
+    selected: frozenset[str],
+    priority_order: tuple[str, ...],
+) -> tuple[Fraction, frozenset[str]]:
+    """Independent exact replay of a fixed global-priority greedy policy."""
+    candidate_map = instance.candidate_map
+    eligible = set(task.eligible_candidates)
+    occupied: set[str] = set()
+    matching: set[str] = set()
+    for candidate_id in priority_order:
+        if candidate_id not in selected or candidate_id not in eligible:
+            continue
+        endpoints = candidate_map[candidate_id].endpoints
+        if endpoints[0] not in occupied and endpoints[1] not in occupied:
+            matching.add(candidate_id)
+            occupied.add(endpoints[0])
+            occupied.add(endpoints[1])
+    matching_set = frozenset(matching)
+    loss = abs(
+        task.alpha
+        + sum((task.corrections[item] for item in matching_set), Fraction())
+    )
+    return loss, matching_set
+
+
+def reference_nominal_objective(
+    instance: Instance,
+    selected: frozenset[str],
+    priority_order: tuple[str, ...],
+) -> tuple[Fraction, dict[str, tuple[Fraction, frozenset[str]]]]:
+    details = {
+        task.id: reference_nominal_task_loss(
+            instance, task, selected, priority_order
+        )
+        for task in instance.tasks
+    }
+    objective = sum(
+        (task.weight * details[task.id][0] for task in instance.tasks), Fraction()
+    )
+    return objective, details
+
+
+@dataclass(frozen=True)
+class NominalReferenceResult:
+    objective: Fraction
+    optimal_sets: tuple[frozenset[str], ...]
+    evaluated_subsets: int
+    feasible_subsets: int
+
+
+def solve_nominal_exhaustive(
+    instance: Instance,
+    priority_order: tuple[str, ...],
+) -> NominalReferenceResult:
+    """Tiny-instance exact reference; production solving uses a MILP."""
+    candidate_ids = instance.candidate_ids
+    best: Fraction | None = None
+    optimal: list[frozenset[str]] = []
+    feasible = 0
+    evaluated = 0
+    for size in range(len(candidate_ids) + 1):
+        for selected_tuple in combinations(candidate_ids, size):
+            evaluated += 1
+            selected = frozenset(selected_tuple)
+            if instance.maintenance_cost(selected) > instance.budget:
+                continue
+            feasible += 1
+            objective, _ = reference_nominal_objective(
+                instance, selected, priority_order
+            )
+            if best is None or objective < best:
+                best = objective
+                optimal = [selected]
+            elif objective == best:
+                optimal.append(selected)
+    if best is None:
+        raise AssertionError("empty selection should be budget feasible")
+    return NominalReferenceResult(
+        objective=best,
+        optimal_sets=tuple(sorted(optimal, key=lambda item: tuple(sorted(item)))),
+        evaluated_subsets=evaluated,
+        feasible_subsets=feasible,
+    )
+
+
 @dataclass(frozen=True)
 class ReferenceResult:
     objective: Fraction
