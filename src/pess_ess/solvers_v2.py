@@ -544,7 +544,7 @@ def solve_master_oracle(
                 instance=instance,
                 lower_bound=lower_bound,
                 upper_bound=float(best_objective)
-                if best_objective is not None
+                if best_objective is not None and exact_oracles == 0
                 else None,
                 solver_reported_optimal=False,
                 validated_feasible=best_selection is not None,
@@ -569,9 +569,10 @@ def solve_master_oracle(
         fallback_successes += result.presolve_fallback_successes
         if not result.optimal:
             # A restricted-master incumbent is only a resource-set proposal.
-            # Accept it as a feasible, unproven outer solution only after the
-            # independent task oracles return exact values and the common
-            # validator recomputes its budget, maximality witnesses, and loss.
+            # Accept it as feasible but unproven after task witnesses pass the
+            # common exact-input validator. A numerical inner MIP status is
+            # retained as such; Fraction witness loss does not certify the
+            # mathematical task-wise maximum.
             if result.incumbent_returned:
                 try:
                     incumbent = _extract_selection(instance, result)
@@ -579,8 +580,10 @@ def solve_master_oracle(
                         incumbent_details: dict[
                             str, tuple[Fraction, frozenset[str]]
                         ] = {}
-                        exact = True
+                        evaluations_complete = True
                         for task in instance.tasks:
+                            task_evaluation_requests += 1
+                            task_evaluations += 1
                             evaluation = evaluate_task(
                                 instance,
                                 task,
@@ -591,19 +594,29 @@ def solve_master_oracle(
                                 deadline=deadline,
                                 clock=clock,
                             )
+                            task_evaluation_computations += 1
+                            exact_oracles += evaluation.exact_oracle_invocations
+                            inner_mip_calls += evaluation.inner_mip_solve_calls
+                            certified_exits += int(evaluation.certified_early_exit)
+                            ordinary_seconds += evaluation.ordinary_matching_seconds
+                            exact_seconds += evaluation.exact_inner_seconds
+                            highs_calls += evaluation.highs_invocations
+                            fallback_attempts += evaluation.presolve_fallback_attempts
+                            fallback_successes += evaluation.presolve_fallback_successes
+                            solver_statuses.extend(evaluation.solver_statuses)
                             if evaluation.source == "mip_nonoptimal":
-                                exact = False
+                                evaluations_complete = False
                                 break
                             if evaluation.source == "certified_bounds" and (
                                 evaluation.lower_bound != evaluation.upper_bound
                             ):
-                                exact = False
+                                evaluations_complete = False
                                 break
                             incumbent_details[task.id] = (
                                 evaluation.value,
                                 evaluation.worst_matching,
                             )
-                        if exact:
+                        if evaluations_complete:
                             validation = validate_outer_solution(
                                 instance, incumbent, incumbent_details
                             )
@@ -619,8 +632,9 @@ def solve_master_oracle(
                                 return _empty_result(
                                     status="feasible_unproven",
                                     reason=(
-                                        "time-limited master incumbent independently "
-                                        "validated; global optimality not established"
+                                        "time-limited master incumbent witnesses "
+                                        "independently validated; global optimality "
+                                        "not established"
                                     ),
                                     iterations=iterations,
                                     cuts=len(cuts),
@@ -631,7 +645,11 @@ def solve_master_oracle(
                                     details=incumbent_details,
                                     instance=instance,
                                     lower_bound=lower_bound,
-                                    upper_bound=float(incumbent_objective),
+                                    upper_bound=(
+                                        float(incumbent_objective)
+                                        if exact_oracles == 0
+                                        else None
+                                    ),
                                     solver_reported_optimal=False,
                                     validated_feasible=True,
                                     master_primal_bound=result.primal_objective,
@@ -662,7 +680,7 @@ def solve_master_oracle(
                 instance=instance,
                 lower_bound=lower_bound,
                 upper_bound=float(best_objective)
-                if best_objective is not None
+                if best_objective is not None and exact_oracles == 0
                 else None,
                 solver_reported_optimal=False,
                 validated_feasible=validation.valid if validation else False,
@@ -737,6 +755,14 @@ def solve_master_oracle(
                 )
             if cached is None:
                 solver_statuses.extend(evaluation.solver_statuses)
+            if (
+                evaluation.source == "certified_bounds"
+                and evaluation.lower_bound != evaluation.upper_bound
+            ):
+                numerical_warnings.append(
+                    f"{task.id}: inner bounds accepted within numerical tolerance; "
+                    "task maximum is not Fraction-certified"
+                )
             details[task.id] = (evaluation.value, evaluation.worst_matching)
             z_value = result.values[len(instance.candidates) + task_index[task.id]]
             violation = float(evaluation.value) - z_value
@@ -833,7 +859,7 @@ def solve_master_oracle(
             details=details,
             instance=instance,
             lower_bound=lower_bound,
-            upper_bound=float(objective),
+            upper_bound=float(objective) if exact_oracles == 0 else None,
             solver_reported_optimal=True,
             validated_feasible=True,
             master_primal_bound=result.primal_objective,

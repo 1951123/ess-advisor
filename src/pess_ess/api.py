@@ -100,8 +100,24 @@ def result_to_dict(
     backend: Backend,
     objective: str = "pess",
 ) -> dict[str, Any]:
-    """Serialize the independently validated resource decision and provenance."""
+    """Serialize validated witnesses, numerical status, and provenance."""
     selected = sorted(result.selected) if result.selected is not None else None
+    selected_pess_value_certified = bool(
+        result.validated_feasible
+        and result.objective is not None
+        and (
+            backend == "static" or result.exact_oracle_invocations == 0
+        )
+        and not any(
+            "task maximum is not Fraction-certified" in warning
+            for warning in result.numerical_warnings
+        )
+    )
+    bound_scope = (
+        "complete_static_formulation"
+        if backend == "static"
+        else "restricted_master_at_termination"
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "objective": objective,
@@ -114,18 +130,21 @@ def result_to_dict(
         "optimality": {
             "solver_reported_optimal": result.solver_reported_optimal,
             "kind": "floating_point_milp_status",
-            "lower_bound": result.lower_bound,
-            "upper_bound": result.upper_bound,
+            "solver_reported_lower_bound": result.lower_bound,
+            "lower_bound_scope": bound_scope,
+            "lower_bound_is_mathematical_certificate": False,
+            "global_incumbent_upper_bound": (
+                str(result.objective) if selected_pess_value_certified else None
+            ),
+            "global_upper_bound_is_fraction_certified": selected_pess_value_certified,
             "mip_gap": (
                 result.master_mip_gap
                 if result.status == "optimal" and result.solver_reported_optimal
+                and selected_pess_value_certified
+                and not result.numerical_warnings
                 else None
             ),
-            "bound_scope": (
-                "complete_static_formulation"
-                if backend == "static"
-                else "restricted_master_at_termination"
-            ),
+            "outer_global_optimum_fraction_certified": False,
         },
         "incumbent": {
             "available": selected is not None,
@@ -136,9 +155,26 @@ def result_to_dict(
                 if result.maintenance_cost is not None
                 else None
             ),
-            "recomputed_objective": (
+            "witness_aggregate": (
                 str(result.objective) if result.objective is not None else None
             ),
+        },
+        "objective_evidence": {
+            "witness_losses_aggregated_with_fraction_arithmetic": True,
+            "selected_pess_value_fraction_certified": selected_pess_value_certified,
+            "basis": (
+                "complete_fraction_matching_enumeration"
+                if backend == "static"
+                else (
+                    "fraction_certified_inner_bounds"
+                    if result.exact_oracle_invocations == 0
+                    else "witnesses_with_numerical_inner_mip_status"
+                )
+            ),
+            "numerical_inner_oracle_invocations_during_run": (
+                result.exact_oracle_invocations
+            ),
+            "inner_mip_solve_calls": result.inner_mip_solve_calls,
         },
         "solver_statuses": [_solver_status(item) for item in result.solver_statuses],
         "wall_time_seconds": result.total_runtime_seconds,

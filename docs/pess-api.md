@@ -35,8 +35,9 @@ result = solve(instance, objective="pess", backend="master_oracle")
 ```
 
 `backend="master_oracle"` is the default and does not enumerate outer resource
-subsets. It adds conditional scenario cuts as needed and invokes the exact
-task oracle. `backend="static"` builds the full conditional formulation by
+subsets. It adds conditional scenario cuts as needed and invokes the task
+oracle, which may use Fraction-certified bounds or a floating-point MILP.
+`backend="static"` builds the full conditional formulation by
 enumerating task matching scenarios; use it only when those families are
 tractable. The exhaustive Fraction reference (`solve_exhaustive`) is for small
 differential checks, not production selection.
@@ -47,14 +48,19 @@ limit), and master-oracle `precompute_invariants` / `task_local_cache`.
 Unsupported objective/backend combinations and negative limits raise
 `ValueError`.
 
-The returned `OuterResult` retains implementation diagnostics. For a compact
-consumer response use `result_to_dict(result, backend=..., objective="pess")`.
-An `optimal` result means the floating-point MILP backend reported optimality
-and the independently recomputed selection/witnesses passed validation; it is
-not a Fraction proof of the MILP optimum. A `feasible_unproven` result means a
-time-limited outer incumbent passed the exact inner-oracle and independent
-feasibility/objective checks. If either check cannot be completed, the
-incumbent is not reported as validated.
+The returned `OuterResult.objective` is the Fraction sum of the reported
+maximal-matching witness losses. Fraction arithmetic makes that witness sum
+exact, but an inner oracle that used HiGHS only has solver-reported numerical
+optimality; it does not independently prove that each witness is a true
+task-wise worst matching. The compact `result_to_dict(...)` output labels this
+as `witness_aggregate`, states whether the selected PESS value is Fraction
+certified, and leaves the corresponding global upper bound null otherwise.
+An `optimal` status means the floating-point MILP backend reported optimality
+and the computed witnesses passed feasibility validation; it is not a
+Fraction proof of the outer optimum. `feasible_unproven` means the timed
+resource selection and its reported witnesses passed independent feasibility
+validation, while global optimality remains unestablished. Inner solver
+statuses used by a timeout incumbent are included in `solver_statuses`.
 
 ## JSON command
 
@@ -109,13 +115,17 @@ Request schema v1:
 
 Rational values may be JSON strings such as `"-3/2"`, integers, or finite
 decimals; they are parsed as exact `Fraction` model inputs. Omit unsupported
-`limits` or `options` fields. The result includes `selected`, independently
-recomputed maintenance and objective values, feasibility and optimality
-labels, solver status codes, supported solver-reported bounds, wall time,
-package/SciPy provenance, and the echoed `input_provenance`. Dual bounds and
-MIP gaps are floating-point solver reports. The gap is null unless the outer
-solver reports a completed optimum; bounds from Master–Oracle are scoped to
-the restricted master at termination and are not exact rational certificates.
+`limits` or `options` fields. The result includes `selected`, recomputed
+maintenance, the exact Fraction sum of witness losses, feasibility and
+optimality labels, solver status codes, scoped solver-reported bounds, wall
+time, package/SciPy provenance, and echoed `input_provenance`. A witness sum is
+not labeled the true PESS value unless every task maximum used a Fraction
+certificate (or the static backend's full matching enumeration). Inner MIP
+statuses are floating-point solver reports; if any inner MIP was used, the
+global incumbent upper bound and global MIP gap are null. The outer lower
+bound, when available, is identified as a solver-reported floating-point
+bound; a Master–Oracle bound is from the restricted master at termination and
+is not an exact rational certificate.
 SciPy's `milp` interface does not expose the bundled HiGHS version, so the
 response reports the SciPy version and explicitly leaves `highs_version`
 null.
@@ -159,8 +169,8 @@ PY
 
 Observed in the Issue #3 Worktree on Python 3.12.3, NumPy 2.5.4, SciPy
 1.18.1, NetworkX 3.7, and package 0.1.0: solver status `optimal`, selected
-`[e01, e12, e34]`, independently recomputed objective 14, exact Fraction
-reference objective 14 with 64 subsets evaluated (44 feasible), 9 master
+`[e01, e12, e34]`, witness aggregate 14, exact Fraction reference objective
+14 with 64 subsets evaluated (44 feasible), 9 master
 iterations, 27 distinct cuts, and 0.088823 seconds reported by the solver
 (0.088872 seconds around the call). This is one bounded model-level success
 and a reference agreement on this six-resource input; it is not a performance

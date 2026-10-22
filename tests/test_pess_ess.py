@@ -227,7 +227,10 @@ def test_all_outer_solvers_agree_on_seeded_small_instances() -> None:
             f"seed={seed}; instance={instance_to_dict(instance)}"
         )
         assert master.lower_bound is not None
-        assert master.upper_bound == float(reference.objective)
+        if master.exact_oracle_invocations:
+            assert master.upper_bound is None
+        else:
+            assert master.upper_bound == float(reference.objective)
 
 
 def test_zero_cost_candidates_and_zero_budget() -> None:

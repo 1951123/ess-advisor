@@ -7,8 +7,10 @@ from io import StringIO
 import pytest
 
 from pess_ess import Candidate, Instance, Task, solve, solve_payload
+from pess_ess.api import result_to_dict
 from pess_ess.mip import MIPAttempt, MIPResult
 from pess_ess.model import instance_to_dict
+from pess_ess.oracle import InnerOracleResult
 from pess_ess.reference import solve_exhaustive
 from pess_ess.solvers import solve_master_oracle
 
@@ -63,7 +65,11 @@ def test_json_schema_round_trip_and_provenance() -> None:
     assert response["schema_version"] == "1"
     assert response["status"] == "optimal"
     assert response["feasibility"] == "feasible"
-    assert response["incumbent"]["recomputed_objective"] is not None
+    assert response["incumbent"]["witness_aggregate"] is not None
+    assert response["objective_evidence"][
+        "witness_losses_aggregated_with_fraction_arithmetic"
+    ]
+    assert not response["optimality"]["outer_global_optimum_fraction_certified"]
     assert response["input_provenance"] == request["input_provenance"]
     assert response["provenance"]["scipy_version"]
     assert response["optimality"]["kind"] == "floating_point_milp_status"
@@ -100,10 +106,13 @@ def test_only_pess_and_supported_backend_limits_are_accepted() -> None:
         solve_payload({"schema_version": "2"})
 
 
-def _time_limit_incumbent(selection: tuple[float, ...]) -> MIPResult:
+def _fake_mip_result(
+    selection: tuple[float, ...], status: int = 1
+) -> MIPResult:
+    message = "time limit reached with incumbent" if status == 1 else "optimal"
     attempt = MIPAttempt(
-        status=1,
-        message="time limit reached with incumbent",
+        status=status,
+        message=message,
         primal_objective=0.0,
         dual_bound=0.0,
         mip_gap=None,
@@ -113,10 +122,10 @@ def _time_limit_incumbent(selection: tuple[float, ...]) -> MIPResult:
         invocation_performed=True,
         presolve=None,
         incumbent_returned=True,
-        optimality_reported=False,
+        optimality_reported=status == 0,
     )
     return MIPResult(
-        status=1,
+        status=status,
         message=attempt.message,
         primal_objective=attempt.primal_objective,
         dual_bound=attempt.dual_bound,
@@ -152,7 +161,7 @@ def test_time_limited_outer_incumbent_is_accepted_only_after_independent_check(
     )
     monkeypatch.setattr(
         "pess_ess.solvers_v2._solve_conditional_master",
-        lambda *args, **kwargs: (_time_limit_incumbent((1.0, 0.0)), {}, 0.0),
+        lambda *args, **kwargs: (_fake_mip_result((1.0, 0.0)), {}, 0.0),
     )
     result = solve_master_oracle(instance)
     assert result.status == "feasible_unproven"
@@ -181,7 +190,7 @@ def test_invalid_fractional_master_incumbent_is_not_returned_as_feasible(
     )
     monkeypatch.setattr(
         "pess_ess.solvers_v2._solve_conditional_master",
-        lambda *args, **kwargs: (_time_limit_incumbent((0.5, 0.0)), {}, 0.0),
+        lambda *args, **kwargs: (_fake_mip_result((0.5, 0.0)), {}, 0.0),
     )
     result = solve_master_oracle(instance)
     assert result.status == "not_optimal"
@@ -208,10 +217,67 @@ def test_time_limited_static_incumbent_is_independently_recomputed(
     )
     monkeypatch.setattr(
         "pess_ess.solvers_v2._solve_conditional_master",
-        lambda *args, **kwargs: (_time_limit_incumbent((1.0, 0.0)), {}, 0.0),
+        lambda *args, **kwargs: (_fake_mip_result((1.0, 0.0)), {}, 0.0),
     )
     result = solve(instance, backend="static")
     assert result.status == "feasible_unproven"
     assert result.objective == 0
     assert result.validated_feasible
     assert not result.solver_reported_optimal
+
+
+@pytest.mark.parametrize("outer_status", [0, 1])
+def test_numerical_inner_mip_is_reported_without_fraction_pess_certificate(
+    monkeypatch: pytest.MonkeyPatch,
+    outer_status: int,
+) -> None:
+    instance = Instance(
+        (Candidate("e", "t", ("a", "b"), Fraction(1)),),
+        (
+            Task(
+                "q",
+                "t",
+                Fraction(1),
+                Fraction(-1),
+                ("e",),
+                {"e": Fraction(1)},
+            ),
+        ),
+        Fraction(1),
+    )
+    outer_mip = _fake_mip_result((1.0, 0.0), status=outer_status)
+    inner_mip = _fake_mip_result((1.0,), status=0)
+    monkeypatch.setattr(
+        "pess_ess.solvers_v2._solve_conditional_master",
+        lambda *args, **kwargs: (outer_mip, {}, 0.0),
+    )
+    monkeypatch.setattr(
+        "pess_ess.solvers_v2.evaluate_task",
+        lambda *args, **kwargs: InnerOracleResult(
+            value=Fraction(0),
+            worst_matching=frozenset({"e"}),
+            source="mip",
+            certified_early_exit=False,
+            lower_bound=Fraction(0),
+            upper_bound=Fraction(0),
+            solver_statuses=(inner_mip,),
+            ordinary_matching_seconds=0.0,
+            exact_inner_seconds=0.0,
+            task_evaluation_seconds=0.0,
+        ),
+    )
+    result = solve_master_oracle(instance)
+    payload = result_to_dict(result, backend="master_oracle")
+    assert result.status == ("optimal" if outer_status == 0 else "feasible_unproven")
+    assert result.exact_oracle_invocations == 1
+    assert result.inner_mip_solve_calls == 1
+    assert len(result.solver_statuses) == 2
+    assert result.upper_bound is None
+    assert payload["incumbent"]["witness_aggregate"] == "0"
+    assert not payload["objective_evidence"][
+        "selected_pess_value_fraction_certified"
+    ]
+    assert payload["optimality"]["global_incumbent_upper_bound"] is None
+    assert payload["optimality"]["mip_gap"] is None
+    assert not payload["optimality"]["outer_global_optimum_fraction_certified"]
+    assert payload["solver_statuses"][1]["solver_reported_optimal"]
