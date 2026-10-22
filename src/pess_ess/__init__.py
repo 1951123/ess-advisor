@@ -1,5 +1,6 @@
 """Synthetic PESS-ESS mathematical model and exact small-instance solvers."""
 
+from .api import result_to_dict, solve, solve_payload
 from .model import Candidate, Instance, Task, read_instance, write_instance
 from .oracle import (
     InnerBounds,
@@ -21,8 +22,11 @@ __all__ = [
     "evaluate_task",
     "ordinary_matching_extrema",
     "read_instance",
+    "result_to_dict",
+    "solve",
     "solve_exhaustive",
     "solve_master_oracle",
+    "solve_payload",
     "solve_static",
     "write_instance",
 ]
