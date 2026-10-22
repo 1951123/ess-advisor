@@ -96,7 +96,7 @@ def test_json_cli_reads_stdin_and_writes_one_result(
 
 def test_only_pess_and_supported_backend_limits_are_accepted() -> None:
     instance = adversarial_instance()
-    with pytest.raises(ValueError, match="only objective='pess'"):
+    with pytest.raises(ValueError, match="objective must be"):
         solve(instance, objective="joint_robust")
     with pytest.raises(ValueError, match="inner_time_limit"):
         solve(instance, backend="static", inner_time_limit=1)
@@ -104,6 +104,112 @@ def test_only_pess_and_supported_backend_limits_are_accepted() -> None:
         solve(instance, time_limit=-1)
     with pytest.raises(ValueError, match="schema_version"):
         solve_payload({"schema_version": "2"})
+
+
+def test_nominal_json_round_trip_serializes_shared_priority_policy() -> None:
+    instance = Instance(
+        (
+            Candidate("e", "t", ("a", "b"), Fraction(1)),
+            Candidate("f", "t", ("b", "c"), Fraction(1)),
+            Candidate("g", "t", ("c", "d"), Fraction(1)),
+        ),
+        (
+            Task(
+                "q",
+                "t",
+                Fraction(1),
+                Fraction(-5),
+                ("e", "f", "g"),
+                {"e": Fraction(4), "f": Fraction(-4), "g": Fraction(1)},
+            ),
+        ),
+        Fraction(2),
+    )
+    response = solve_payload(
+        {
+            "schema_version": "1",
+            "objective": "nominal",
+            "priority_order": ["e", "f", "g"],
+            "instance": instance_to_dict(instance),
+        }
+    )
+    assert response["status"] == "optimal"
+    assert response["backend"] == "fixed_priority_milp"
+    assert response["policy"] == {
+        "kind": "fixed_global_candidate_priority_greedy",
+        "priority_order": ["e", "f", "g"],
+    }
+    assert response["incumbent"]["objective_value"] == "0"
+    assert response["optimality"]["global_incumbent_upper_bound"] == "0"
+    assert response["objective_evidence"][
+        "selected_nominal_value_fraction_certified"
+    ]
+    direct_result = solve(
+        instance,
+        objective="nominal",
+        priority_order=("e", "f", "g"),
+    )
+    assert result_to_dict(
+        direct_result,
+        backend="fixed_priority_milp",
+        objective="nominal",
+    )["policy"]["priority_order"] == ["e", "f", "g"]
+    with pytest.raises(ValueError, match="does not match"):
+        result_to_dict(
+            direct_result,
+            backend="fixed_priority_milp",
+            objective="nominal",
+            priority_order=("g", "f", "e"),
+        )
+
+
+def test_nominal_json_requires_priority_order() -> None:
+    payload = {
+        "schema_version": "1",
+        "objective": "nominal",
+        "instance": instance_to_dict(adversarial_instance()),
+    }
+    with pytest.raises(ValueError, match="requires priority_order"):
+        solve_payload(payload)
+
+
+def test_nominal_time_limited_incumbent_is_replayed_and_labeled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instance = Instance(
+        (
+            Candidate("e", "t", ("a", "b"), Fraction(1)),
+            Candidate("f", "t", ("b", "c"), Fraction(1)),
+            Candidate("g", "t", ("c", "d"), Fraction(1)),
+        ),
+        (
+            Task(
+                "q",
+                "t",
+                Fraction(1),
+                Fraction(-5),
+                ("e", "f", "g"),
+                {"e": Fraction(4), "f": Fraction(-4), "g": Fraction(1)},
+            ),
+        ),
+        Fraction(2),
+    )
+    monkeypatch.setattr(
+        "pess_ess.nominal.solve_binary_milp",
+        lambda *args, **kwargs: _fake_mip_result(
+            (1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0), status=1
+        ),
+    )
+    result = solve(
+        instance,
+        objective="nominal",
+        priority_order=("e", "f", "g"),
+    )
+    assert result.status == "feasible_unproven"
+    assert result.validated_feasible
+    assert result.selected == frozenset({"e", "g"})
+    assert result.objective == 0
+    assert not result.solver_reported_optimal
 
 
 def _fake_mip_result(

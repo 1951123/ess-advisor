@@ -14,8 +14,15 @@ from pess_ess.matchings import (
 )
 from pess_ess.mip import solve_binary_milp
 from pess_ess.model import Candidate, Instance, Task, instance_to_dict
+from pess_ess.nominal import priority_matching, solve_nominal
 from pess_ess.oracle import evaluate_task, exact_maximal_matching_oracle, inner_bounds
-from pess_ess.reference import reference_objective, solve_exhaustive
+from pess_ess.reference import (
+    reference_nominal_objective,
+    reference_nominal_task_loss,
+    reference_objective,
+    solve_exhaustive,
+    solve_nominal_exhaustive,
+)
 from pess_ess.solvers import (
     MasterOracleOptions,
     TaskLocalOracleCache,
@@ -83,6 +90,76 @@ def test_empty_universe_and_empty_task_graph() -> None:
     assert reference.optimal_sets == (frozenset(),)
     assert solve_static(instance).objective == reference.objective
     assert solve_master_oracle(instance).objective == reference.objective
+
+
+def test_fixed_priority_nominal_milp_matches_fraction_reference() -> None:
+    candidates = (
+        edge("e", ("a", "b")),
+        edge("f", ("b", "c")),
+        edge("g", ("c", "d")),
+        edge("h", ("a", "b")),
+    )
+    instance = make_instance(
+        candidates,
+        (
+            (
+                "q1",
+                Fraction(1),
+                Fraction(-5),
+                ("e", "f", "g", "h"),
+                {"e": Fraction(4), "f": Fraction(-4), "g": Fraction(1), "h": Fraction(3)},
+            ),
+            (
+                "q2",
+                Fraction(2),
+                Fraction(-2),
+                ("e", "f", "g"),
+                {"e": Fraction(1), "f": Fraction(5), "g": Fraction(-2)},
+            ),
+        ),
+        Fraction(2),
+    )
+    for order in (
+        ("e", "f", "g", "h"),
+        ("f", "g", "h", "e"),
+        ("h", "g", "f", "e"),
+    ):
+        expected = solve_nominal_exhaustive(instance, order)
+        result = solve_nominal(instance, order)
+        assert result.status == "optimal"
+        assert result.validated_feasible
+        assert result.objective == expected.objective
+        assert result.selected in expected.optimal_sets
+        for size in range(len(instance.candidate_ids) + 1):
+            for selected_tuple in combinations(instance.candidate_ids, size):
+                selected = frozenset(selected_tuple)
+                expected_details = reference_nominal_objective(
+                    instance, selected, order
+                )[1]
+                for task in instance.tasks:
+                    matching = priority_matching(instance, task, selected, order)
+                    assert matching == expected_details[task.id][1]
+                    assert reference_nominal_task_loss(
+                        instance, task, selected, order
+                    ) == expected_details[task.id]
+    all_selected = frozenset(instance.candidate_ids)
+    q1 = instance.task_map["q1"]
+    assert priority_matching(
+        instance, q1, all_selected, ("e", "f", "g", "h")
+    ) == frozenset({"e", "g"})
+    assert priority_matching(
+        instance, q1, all_selected, ("f", "g", "h", "e")
+    ) == frozenset({"f"})
+
+
+def test_priority_order_must_be_a_complete_permutation() -> None:
+    instance = two_disjoint_instance()
+    with pytest.raises(ValueError, match="permutation"):
+        solve_nominal(instance, ("e",))
+    with pytest.raises(ValueError, match="duplicate"):
+        solve_nominal(instance, ("e", "e"))
+    with pytest.raises(TypeError, match="sequence"):
+        solve_nominal(instance, "ef")
 
 
 def test_single_edge_and_tight_budget() -> None:
