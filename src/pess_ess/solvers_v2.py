@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
+from math import isfinite
 
 from .matchings import enumerate_matchings
 from .mip import MIPResult, solve_binary_milp
@@ -234,6 +235,8 @@ def _extract_selection(instance: Instance, result: MIPResult) -> frozenset[str]:
     selected = set()
     for index, candidate in enumerate(instance.candidates):
         value = result.values[index]
+        if not isfinite(value):
+            raise RuntimeError("MIP returned a non-finite integer selection")
         if abs(value - round(value)) > 1e-5:
             raise RuntimeError("MIP returned a fractional integer selection")
         if round(value):
@@ -328,6 +331,48 @@ def solve_static(
     master_seconds = result.total_duration_seconds
     scenario_count = sum(len(matchings) for _, matchings in all_matchings)
     if not result.optimal:
+        if result.incumbent_returned:
+            try:
+                incumbent = _extract_selection(instance, result)
+                if instance.maintenance_cost(incumbent) <= instance.budget:
+                    objective, details = reference_objective(instance, incumbent)
+                    validation = validate_outer_solution(instance, incumbent, details)
+                    if validation.valid:
+                        return _empty_result(
+                            status="feasible_unproven",
+                            reason=(
+                                "time-limited static incumbent independently "
+                                "validated; global optimality not established"
+                            ),
+                            iterations=1,
+                            cuts=len(cuts),
+                            scenarios=scenario_count,
+                            statuses=(result,),
+                            selected=incumbent,
+                            objective=objective,
+                            details=details,
+                            instance=instance,
+                            lower_bound=_master_lower_bound(result),
+                            upper_bound=float(objective),
+                            solver_reported_optimal=False,
+                            validated_feasible=True,
+                            master_primal_bound=result.primal_objective,
+                            master_dual_bound=result.dual_bound,
+                            master_mip_gap=result.mip_gap,
+                            master_phase_seconds=master_seconds,
+                            cut_construction_seconds=build_seconds,
+                            total_runtime_seconds=clock() - started,
+                            highs_invocations=result.highs_invocations,
+                            presolve_fallback_attempts=int(
+                                result.presolve_fallback_attempted
+                            ),
+                            presolve_fallback_successes=(
+                                result.presolve_fallback_successes
+                            ),
+                        )
+            except (RuntimeError, ValueError, OverflowError):
+                # Invalid or uncheckable numerical incumbents are not usable.
+                pass
         return _empty_result(
             status="not_optimal",
             reason=result.message,
@@ -523,6 +568,82 @@ def solve_master_oracle(
         fallback_attempts += int(result.presolve_fallback_attempted)
         fallback_successes += result.presolve_fallback_successes
         if not result.optimal:
+            # A restricted-master incumbent is only a resource-set proposal.
+            # Accept it as a feasible, unproven outer solution only after the
+            # independent task oracles return exact values and the common
+            # validator recomputes its budget, maximality witnesses, and loss.
+            if result.incumbent_returned:
+                try:
+                    incumbent = _extract_selection(instance, result)
+                    if instance.maintenance_cost(incumbent) <= instance.budget:
+                        incumbent_details: dict[
+                            str, tuple[Fraction, frozenset[str]]
+                        ] = {}
+                        exact = True
+                        for task in instance.tasks:
+                            evaluation = evaluate_task(
+                                instance,
+                                task,
+                                incumbent,
+                                time_limit=inner_time_limit,
+                                certification_tolerance=0.0,
+                                reuse_bounds=options.precompute_invariants,
+                                deadline=deadline,
+                                clock=clock,
+                            )
+                            if evaluation.source == "mip_nonoptimal":
+                                exact = False
+                                break
+                            if evaluation.source == "certified_bounds" and (
+                                evaluation.lower_bound != evaluation.upper_bound
+                            ):
+                                exact = False
+                                break
+                            incumbent_details[task.id] = (
+                                evaluation.value,
+                                evaluation.worst_matching,
+                            )
+                        if exact:
+                            validation = validate_outer_solution(
+                                instance, incumbent, incumbent_details
+                            )
+                            if validation.valid:
+                                incumbent_objective = sum(
+                                    (
+                                        task.weight
+                                        * incumbent_details[task.id][0]
+                                        for task in instance.tasks
+                                    ),
+                                    Fraction(),
+                                )
+                                return _empty_result(
+                                    status="feasible_unproven",
+                                    reason=(
+                                        "time-limited master incumbent independently "
+                                        "validated; global optimality not established"
+                                    ),
+                                    iterations=iterations,
+                                    cuts=len(cuts),
+                                    scenarios=len(cuts),
+                                    statuses=tuple(solver_statuses),
+                                    selected=incumbent,
+                                    objective=incumbent_objective,
+                                    details=incumbent_details,
+                                    instance=instance,
+                                    lower_bound=lower_bound,
+                                    upper_bound=float(incumbent_objective),
+                                    solver_reported_optimal=False,
+                                    validated_feasible=True,
+                                    master_primal_bound=result.primal_objective,
+                                    master_dual_bound=result.dual_bound,
+                                    master_mip_gap=result.mip_gap,
+                                    **metrics(),
+                                )
+                except (RuntimeError, ValueError, OverflowError):
+                    # Do not surface a numerically invalid incumbent as a
+                    # feasible solution. The ordinary nonoptimal result below
+                    # retains the backend diagnostics.
+                    pass
             validation = (
                 validate_outer_solution(instance, best_selection, best_details)
                 if best_selection is not None

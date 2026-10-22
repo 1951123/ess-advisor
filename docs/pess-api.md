@@ -1,0 +1,178 @@
+# Structured PESS solver API (schema v1)
+
+## Scope
+
+This API solves the structured **task-wise PESS** objective. For each task it
+maximizes loss over the admissible maximal matchings, then sums those task
+maxima with positive task weights. It does not implement Nominal or
+Joint-Robust objectives.
+
+The model is deliberately narrower than generic ESS:
+
+- resources are **labeled edges** joining two distinct attributes; parallel
+  edges with distinct IDs are allowed;
+- a task uses complete **maximal** matchings (not maximum-cardinality
+  matchings), with task-specific eligible resources;
+- task corrections may have mixed signs and zero-cost resources are allowed;
+- task weights must be positive;
+- the input loss is `abs(alpha + sum(correction))`, the positive pre-clamp
+  absolute-log-error abstraction;
+- maintenance is a nonnegative **additive per-resource proxy**. Generic
+  `Maint(M)` may be nonadditive and is not implemented by this model.
+
+These restrictions are conditional model assumptions, not claims about every
+PostgreSQL query or catalog. Put calibration/loss version, PostgreSQL source
+and binary identity, data/workload identity, and cost-model identity in
+`input_provenance`; the solver does not infer or alter them.
+
+## Python API
+
+```python
+from pess_ess import read_instance, solve
+
+instance = read_instance("instance.json")
+result = solve(instance, objective="pess", backend="master_oracle")
+```
+
+`backend="master_oracle"` is the default and does not enumerate outer resource
+subsets. It adds conditional scenario cuts as needed and invokes the exact
+task oracle. `backend="static"` builds the full conditional formulation by
+enumerating task matching scenarios; use it only when those families are
+tractable. The exhaustive Fraction reference (`solve_exhaustive`) is for small
+differential checks, not production selection.
+
+Supported keyword options are `time_limit` (per MILP call), `inner_time_limit`
+(per inner task oracle; master-oracle only), `total_time_limit` (global wall
+limit), and master-oracle `precompute_invariants` / `task_local_cache`.
+Unsupported objective/backend combinations and negative limits raise
+`ValueError`.
+
+The returned `OuterResult` retains implementation diagnostics. For a compact
+consumer response use `result_to_dict(result, backend=..., objective="pess")`.
+An `optimal` result means the floating-point MILP backend reported optimality
+and the independently recomputed selection/witnesses passed validation; it is
+not a Fraction proof of the MILP optimum. A `feasible_unproven` result means a
+time-limited outer incumbent passed the exact inner-oracle and independent
+feasibility/objective checks. If either check cannot be completed, the
+incumbent is not reported as validated.
+
+## JSON command
+
+Install the package in the environment that will run it, then send one JSON
+request on stdin or as a file:
+
+```sh
+pess-ess-solve request.json > result.json
+```
+
+Request schema v1:
+
+```json
+{
+  "schema_version": "1",
+  "objective": "pess",
+  "backend": "master_oracle",
+  "limits": {
+    "time_seconds": 60,
+    "inner_time_seconds": 20,
+    "total_time_seconds": 120
+  },
+  "options": {
+    "precompute_invariants": true,
+    "task_local_cache": true
+  },
+  "input_provenance": {
+    "model_version": "forest10-positive-preclamp-v1",
+    "advisor_source_commit": "<immutable 40-character commit SHA>",
+    "research_source_commit": "<immutable 40-character commit SHA>",
+    "postgresql_source_commit": "<immutable 40-character commit SHA or null>",
+    "calibration_id": "<frozen calibration identifier or null>"
+  },
+  "instance": {
+    "budget": "2",
+    "candidates": [
+      {"id": "ab", "table": "t", "endpoints": ["a", "b"], "maintenance_cost": "1"}
+    ],
+    "tasks": [
+      {
+        "id": "q1",
+        "table": "t",
+        "weight": "1",
+        "alpha": "-1/2",
+        "eligible_candidates": ["ab"],
+        "corrections": {"ab": "1/2"}
+      }
+    ]
+  }
+}
+```
+
+Rational values may be JSON strings such as `"-3/2"`, integers, or finite
+decimals; they are parsed as exact `Fraction` model inputs. Omit unsupported
+`limits` or `options` fields. The result includes `selected`, independently
+recomputed maintenance and objective values, feasibility and optimality
+labels, solver status codes, supported solver-reported bounds, wall time,
+package/SciPy provenance, and the echoed `input_provenance`. Dual bounds and
+MIP gaps are floating-point solver reports. The gap is null unless the outer
+solver reports a completed optimum; bounds from Master–Oracle are scoped to
+the restricted master at termination and are not exact rational certificates.
+SciPy's `milp` interface does not expose the bundled HiGHS version, so the
+response reports the SciPy version and explicitly leaves `highs_version`
+null.
+
+Invalid JSON or unsupported values produce a short stderr message and exit
+code 2. A valid request that the numerical solver cannot solve still returns
+a JSON result with its solver status and no falsely validated incumbent.
+
+## Reproducible bounded-budget smoke run
+
+The following reuses the frozen six-candidate/four-task model-only instance in
+`ess-research@a7aa91e10dd199fd8eb6e5cbaaf1f6e05a607207`,
+`experiments/forest10-decision/instance.json` (SHA-256
+`afa2f6e21ba35e48352df70ee4287d1a4c71b2fed568cb78ae6d7e24d5929cad`). That
+artifact explicitly labels its rational parameters synthetic and not
+Forest10/PG measurements. Budget 5 is one of its precommitted budget rows and
+is above 3. No research artifact is copied or changed.
+
+```sh
+: "${ESS_RESEARCH_ROOT:?Set to a clean checkout at the pinned commit above}"
+.venv/bin/python - "$ESS_RESEARCH_ROOT/experiments/forest10-decision/instance.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+from pess_ess import solve
+from pess_ess.model import instance_from_dict
+from pess_ess.reference import solve_exhaustive
+
+source = Path(sys.argv[1])
+raw = json.loads(source.read_text(encoding="utf-8"))
+raw["budget"] = "5"
+instance = instance_from_dict(raw)
+result = solve(instance, backend="master_oracle", total_time_limit=10.0)
+reference = solve_exhaustive(instance)
+assert result.validated_feasible
+assert result.objective == reference.objective
+print(result.status, sorted(result.selected or ()), result.objective,
+      reference.evaluated_subsets, result.total_runtime_seconds)
+PY
+```
+
+Observed in the Issue #3 Worktree on Python 3.12.3, NumPy 2.5.4, SciPy
+1.18.1, NetworkX 3.7, and package 0.1.0: solver status `optimal`, selected
+`[e01, e12, e34]`, independently recomputed objective 14, exact Fraction
+reference objective 14 with 64 subsets evaluated (44 feasible), 9 master
+iterations, 27 distinct cuts, and 0.088823 seconds reported by the solver
+(0.088872 seconds around the call). This is one bounded model-level success
+and a reference agreement on this six-resource input; it is not a performance
+comparison, PG observation, or guarantee for larger instances.
+
+## Immutable consumer pins
+
+The advisor implementation base for this API work is
+`1951123/ess-advisor@207cfc41ada05cdc5fa191076749c715fd60c1b9`. The accepted
+research semantics were checked against
+`1951123/ess-research@a7aa91e10dd199fd8eb6e5cbaaf1f6e05a607207`, including
+D-007/D-008 in `docs/DECISIONS.md`. A consumer must record the exact reviewed
+and merged advisor commit (or immutable package version) together with schema
+version `1`; consumers must not depend on a moving branch or an unmerged
+worktree. Research-side data loading and comparisons are a separate task.

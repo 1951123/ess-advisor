@@ -13,6 +13,9 @@ dependencies = [
   "networkx>=3.2,<4",
 ]
 
+[project.scripts]
+pess-ess-solve = "pess_ess.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

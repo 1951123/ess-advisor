@@ -26,6 +26,11 @@ a static strengthened conditional MILP, and an integer Master--Oracle
 prototype using SciPy optimize.milp with HiGHS. MIP statuses are reported
 explicitly; a time-limited incumbent is never labeled optimal.
 
+The structured task-wise PESS solvers also have a small callable API and a
+versioned JSON command (`pess-ess-solve`). See
+[the PESS API contract](docs/pess-api.md) for model restrictions, result
+labels, time-limit behavior, and the consumer schema.
+
 ## Development workflow
 
 See [agent and worktree instructions](AGENTS.md) for repository-local Codex rules, environment setup, test boundaries and immutable cross-repository dependencies.
