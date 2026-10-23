@@ -11,7 +11,7 @@ from pess_ess.api import result_to_dict
 from pess_ess.mip import MIPAttempt, MIPResult
 from pess_ess.model import instance_to_dict
 from pess_ess.oracle import InnerOracleResult
-from pess_ess.reference import solve_exhaustive
+from pess_ess.reference import solve_exhaustive, solve_nominal_exhaustive
 from pess_ess.solvers import solve_master_oracle
 
 
@@ -46,6 +46,93 @@ def test_both_backends_match_fraction_reference_on_mixed_sign_parallel_case() ->
         assert result.status == "optimal"
         assert result.validated_feasible
         assert result.objective == reference.objective
+
+
+def test_exact_enumeration_matches_fraction_references_and_preserves_ties() -> None:
+    instance = adversarial_instance()
+    pess_reference = solve_exhaustive(instance)
+    pess = solve(instance, objective="pess", backend="exact_enumeration")
+    assert pess.complete
+    assert pess.objective == pess_reference.objective
+    assert pess.optimal_sets == pess_reference.optimal_sets
+    assert pess.evaluated_subsets == pess.feasible_subsets
+    assert pess.pruned_branches > 0
+
+    order = ("ab-2", "cd", "ab-1", "bc")
+    nominal_reference = solve_nominal_exhaustive(instance, order)
+    nominal = solve(instance, objective="nominal", backend="exact_enumeration", priority_order=order)
+    assert nominal.complete
+    assert nominal.objective == nominal_reference.objective
+    assert nominal.optimal_sets == nominal_reference.optimal_sets
+
+
+def test_exact_enumeration_keeps_all_zero_loss_ties_and_canonicalizes() -> None:
+    instance = Instance(
+        tuple(
+            Candidate(edge, "t", endpoints, Fraction(0))
+            for edge, endpoints in (
+                ("ab", ("a", "b")),
+                ("bc", ("b", "c")),
+                ("cd", ("c", "d")),
+            )
+        ),
+        (Task("q", "t", Fraction(1), Fraction(0), ("ab", "bc", "cd"),
+              {"ab": Fraction(0), "bc": Fraction(0), "cd": Fraction(0)}),),
+        Fraction(0),
+    )
+    result = solve(instance, backend="exact_enumeration")
+    reference = solve_exhaustive(instance)
+    assert result.objective == 0
+    assert result.optimal_sets == reference.optimal_sets
+    assert len(result.optimal_sets) == 8
+
+
+def test_exact_enumeration_json_and_cli_have_distinct_exact_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request = {
+        "schema_version": "1",
+        "objective": "pess",
+        "backend": "exact_enumeration",
+        "instance": instance_to_dict(adversarial_instance()),
+    }
+    response = solve_payload(json.loads(json.dumps(request)))
+    assert response["backend"] == "exact_enumeration"
+    assert response["optimality"]["kind"] == "exact_fraction_enumeration"
+    assert response["optimality"]["outer_global_optimum_fraction_certified"]
+    assert response["solver_statuses"] == []
+    assert response["exact_enumeration"]["optimal_sets"]
+
+    from pess_ess.cli import main
+
+    monkeypatch.setattr("sys.argv", ["pess-ess-solve"])
+    monkeypatch.setattr("sys.stdin", StringIO(json.dumps(request)))
+    assert main() == 0
+    cli_response = json.loads(capsys.readouterr().out)
+    assert cli_response["backend"] == response["backend"]
+    assert cli_response["exact_enumeration"]["optimal_sets"] == response["exact_enumeration"]["optimal_sets"]
+    assert cli_response["exact_enumeration"]["objective_fraction"] == response["exact_enumeration"]["objective_fraction"]
+
+
+def test_exact_enumeration_timeout_never_claims_optimality() -> None:
+    response = solve_payload({
+        "schema_version": "1",
+        "objective": "pess",
+        "backend": "exact_enumeration",
+        "limits": {"total_time_seconds": 0},
+        "instance": instance_to_dict(adversarial_instance()),
+    })
+    assert response["status"] == "interrupted"
+    assert response["exact_enumeration"]["complete"] is False
+    assert "optimal_sets" not in response["exact_enumeration"]
+    assert not response["optimality"]["outer_global_optimum_fraction_certified"]
+
+
+def test_static_is_not_outer_subset_enumeration() -> None:
+    result = solve(adversarial_instance(), objective="pess", backend="static")
+    response = result_to_dict(result, backend="static")
+    assert response["backend"] == "static"
+    assert response["optimality"]["kind"] == "floating_point_milp_status"
 
 
 def test_json_schema_round_trip_and_provenance() -> None:
