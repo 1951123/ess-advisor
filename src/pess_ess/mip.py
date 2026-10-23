@@ -44,6 +44,9 @@ class MIPResult:
     highs_invocations: int
     presolve_fallback_attempted: bool
     presolve_fallback_successes: int
+    coo_assembly_seconds: float = 0.0
+    coo_to_csr_seconds: float = 0.0
+    solver_input_preparation_seconds: float = 0.0
 
     @property
     def objective(self) -> float | None:
@@ -72,8 +75,10 @@ SolverRunner = Callable[..., Any]
 def _sparse_constraint_matrix(
     rows: list[tuple[dict[int, float], float, float]],
     column_count: int,
-) -> csr_matrix:
+    clock: Callable[[], float] = time.perf_counter,
+) -> tuple[csr_matrix, float, float]:
     """Build the row-dictionary constraints without a dense intermediate."""
+    assembly_started = clock()
     row_indices: list[int] = []
     column_indices: list[int] = []
     values: list[float] = []
@@ -88,11 +93,16 @@ def _sparse_constraint_matrix(
             row_indices.append(row_index)
             column_indices.append(normalized_index)
             values.append(coefficient)
-    return coo_matrix(
+    coo = coo_matrix(
         (values, (row_indices, column_indices)),
         shape=(len(rows), column_count),
         dtype=float,
-    ).tocsr()
+    )
+    assembly_seconds = clock() - assembly_started
+    conversion_started = clock()
+    matrix = coo.tocsr()
+    coo_to_csr_seconds = clock() - conversion_started
+    return matrix, assembly_seconds, coo_to_csr_seconds
 
 
 def _finite_float(value: Any) -> float | None:
@@ -167,6 +177,7 @@ def solve_binary_milp(
     time_limit is a per-call limit. deadline is an absolute monotonic
     deadline shared by an outer algorithm and a presolve retry.
     """
+    preparation_started = clock()
     objective_array = np.asarray(tuple(objective), dtype=float)
     integral_array = np.asarray(tuple(integrality), dtype=int)
     lower_array = np.asarray(tuple(lower_bounds), dtype=float)
@@ -175,16 +186,19 @@ def solve_binary_milp(
         raise ValueError("objective and integrality lengths differ")
     if len(lower_array) != len(objective_array):
         raise ValueError("variable bound lengths differ")
-    matrix = _sparse_constraint_matrix(rows, len(objective_array))
+    matrix, coo_assembly_seconds, coo_to_csr_seconds = _sparse_constraint_matrix(
+        rows, len(objective_array), clock=clock
+    )
     row_lower = np.full(len(rows), -np.inf, dtype=float)
     row_upper = np.full(len(rows), np.inf, dtype=float)
-    for row_index, (coefficients, lower, upper) in enumerate(rows):
-        for variable_index, coefficient in coefficients.items():
-            matrix[row_index, variable_index] = coefficient
+    for row_index, (_coefficients, lower, upper) in enumerate(rows):
         row_lower[row_index] = lower
         row_upper[row_index] = upper
     constraints = LinearConstraint(matrix, row_lower, row_upper) if rows else None
     bounds = Bounds(lower_array, upper_array)
+    solver_input_preparation_seconds = (
+        clock() - preparation_started - coo_assembly_seconds - coo_to_csr_seconds
+    )
     runner = solver_runner or milp
     started = clock()
     operation_deadline = deadline
@@ -262,4 +276,7 @@ def solve_binary_milp(
         + (int(retry.invocation_performed) if retry is not None else 0),
         presolve_fallback_attempted=retry is not None,
         presolve_fallback_successes=int(retry is not None and retry.status == 0),
+        coo_assembly_seconds=coo_assembly_seconds,
+        coo_to_csr_seconds=coo_to_csr_seconds,
+        solver_input_preparation_seconds=solver_input_preparation_seconds,
     )

@@ -73,6 +73,15 @@ def test_json_schema_round_trip_and_provenance() -> None:
     assert response["input_provenance"] == request["input_provenance"]
     assert response["provenance"]["scipy_version"]
     assert response["optimality"]["kind"] == "floating_point_milp_status"
+    assert set(response["phase_timings_seconds"]) == {
+        "python_constraint_construction",
+        "coo_assembly",
+        "coo_to_csr_conversion",
+        "solver_input_preparation",
+        "mip_solver_calls",
+    }
+    assert all(value >= 0.0 for value in response["phase_timings_seconds"].values())
+    assert response["solver_statuses"][0]["coo_to_csr_seconds"] >= 0.0
 
 
 def test_json_cli_reads_stdin_and_writes_one_result(

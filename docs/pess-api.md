@@ -152,6 +152,14 @@ global incumbent upper bound and global MIP gap are null. The outer lower
 bound, when available, is identified as a solver-reported floating-point
 bound; a Master–Oracle bound is from the restricted master at termination and
 is not an exact rational certificate.
+
+The JSON response's `phase_timings_seconds` separates Python constraint
+construction, row-dictionary/COO assembly, COO-to-CSR conversion, remaining
+MILP input preparation (`Bounds`/`LinearConstraint` setup and array conversion),
+and the recorded MILP solver-call durations. Per-invocation details are also
+included in each `solver_statuses` entry. These are wall-clock diagnostics, not
+solver-runtime-only measurements; `wall_time_seconds` remains the overall
+request duration.
 SciPy's `milp` interface does not expose the bundled HiGHS version, so the
 response reports the SciPy version and explicitly leaves `highs_version`
 null.

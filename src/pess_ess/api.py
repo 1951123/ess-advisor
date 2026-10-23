@@ -110,6 +110,9 @@ def _solver_status(item: Any) -> dict[str, Any]:
         "dual_bound": item.dual_bound,
         "mip_gap": item.mip_gap,
         "duration_seconds": item.total_duration_seconds,
+        "coo_assembly_seconds": item.coo_assembly_seconds,
+        "coo_to_csr_seconds": item.coo_to_csr_seconds,
+        "solver_input_preparation_seconds": item.solver_input_preparation_seconds,
         "highs_invocations": item.highs_invocations,
         "selected_attempt": item.selected_attempt,
     }
@@ -241,6 +244,22 @@ def result_to_dict(
             else {}
         ),
         "solver_statuses": [_solver_status(item) for item in result.solver_statuses],
+        "phase_timings_seconds": {
+            "python_constraint_construction": result.cut_construction_seconds,
+            "coo_assembly": sum(
+                item.coo_assembly_seconds for item in result.solver_statuses
+            ),
+            "coo_to_csr_conversion": sum(
+                item.coo_to_csr_seconds for item in result.solver_statuses
+            ),
+            "solver_input_preparation": sum(
+                item.solver_input_preparation_seconds
+                for item in result.solver_statuses
+            ),
+            "mip_solver_calls": sum(
+                item.total_duration_seconds for item in result.solver_statuses
+            ),
+        },
         "wall_time_seconds": result.total_runtime_seconds,
         "provenance": {
             "package": "pess-ess",
