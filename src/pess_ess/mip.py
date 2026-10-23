@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
+from scipy.sparse import coo_matrix, csr_matrix
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,32 @@ class MIPResult:
 
 
 SolverRunner = Callable[..., Any]
+
+
+def _sparse_constraint_matrix(
+    rows: list[tuple[dict[int, float], float, float]],
+    column_count: int,
+) -> csr_matrix:
+    """Build the row-dictionary constraints without a dense intermediate."""
+    row_indices: list[int] = []
+    column_indices: list[int] = []
+    values: list[float] = []
+    for row_index, (coefficients, _lower, _upper) in enumerate(rows):
+        for variable_index, coefficient in coefficients.items():
+            # Match NumPy's former dense assignment behavior for negative indices.
+            normalized_index = variable_index
+            if normalized_index < 0:
+                normalized_index += column_count
+            if normalized_index < 0 or normalized_index >= column_count:
+                raise IndexError("constraint variable index out of range")
+            row_indices.append(row_index)
+            column_indices.append(normalized_index)
+            values.append(coefficient)
+    return coo_matrix(
+        (values, (row_indices, column_indices)),
+        shape=(len(rows), column_count),
+        dtype=float,
+    ).tocsr()
 
 
 def _finite_float(value: Any) -> float | None:
@@ -148,7 +175,7 @@ def solve_binary_milp(
         raise ValueError("objective and integrality lengths differ")
     if len(lower_array) != len(objective_array):
         raise ValueError("variable bound lengths differ")
-    matrix = np.zeros((len(rows), len(objective_array)), dtype=float)
+    matrix = _sparse_constraint_matrix(rows, len(objective_array))
     row_lower = np.full(len(rows), -np.inf, dtype=float)
     row_upper = np.full(len(rows), np.inf, dtype=float)
     for row_index, (coefficients, lower, upper) in enumerate(rows):

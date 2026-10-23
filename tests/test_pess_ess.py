@@ -5,6 +5,8 @@ from itertools import combinations
 from types import SimpleNamespace
 
 import pytest
+from scipy.optimize import LinearConstraint
+from scipy.sparse import csr_matrix
 
 from pess_ess.generate import generate_instance
 from pess_ess.matchings import (
@@ -457,6 +459,76 @@ def test_mip_result_separates_primal_dual_and_records_presolve_retry() -> None:
     assert result.dual_bound == 4.0
     assert result.objective == result.primal_objective
     assert options_seen[1]["presolve"] is False
+
+
+def test_mip_passes_sparse_constraints_without_changing_coefficients_or_bounds() -> None:
+    rows = [
+        ({0: 2.5, 3: -4.0}, -1.0, 7.0),
+        ({1: 0.0, 2: -3.0}, 2.0, float("inf")),
+        ({}, float("-inf"), 0.0),
+    ]
+
+    def inspect_runner(**kwargs):
+        constraint = kwargs["constraints"]
+        assert isinstance(constraint, LinearConstraint)
+        assert isinstance(constraint.A, csr_matrix)
+        assert constraint.A.shape == (3, 4)
+        assert constraint.A.nnz == 4
+        assert constraint.A.toarray().tolist() == [
+            [2.5, 0.0, 0.0, -4.0],
+            [0.0, 0.0, -3.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]
+        assert constraint.lb.tolist() == [-1.0, 2.0, float("-inf")]
+        assert constraint.ub.tolist() == [7.0, float("inf"), 0.0]
+        return SimpleNamespace(status=0, message="ok", fun=0.0, x=[0.0] * 4)
+
+    result = solve_binary_milp(
+        objective=(0.0,) * 4,
+        integrality=(1,) * 4,
+        lower_bounds=(0.0,) * 4,
+        upper_bounds=(1.0,) * 4,
+        rows=rows,
+        solver_runner=inspect_runner,
+    )
+    assert result.optimal
+
+
+def test_sparse_mip_assembly_scales_with_nonzeros_and_handles_empty_model() -> None:
+    row_count = 10_000
+    column_count = 10_000
+    rows = [({}, 0.0, 0.0) for _ in range(row_count)]
+    rows[0] = ({0: -2.0, column_count - 1: 3.0}, -1.0, 1.0)
+
+    def inspect_runner(**kwargs):
+        matrix = kwargs["constraints"].A
+        assert isinstance(matrix, csr_matrix)
+        assert matrix.shape == (row_count, column_count)
+        assert matrix.nnz == 2
+        assert matrix[0, 0] == -2.0
+        assert matrix[0, column_count - 1] == 3.0
+        return SimpleNamespace(status=0, message="ok", fun=0.0, x=[0.0] * column_count)
+
+    solve_binary_milp(
+        objective=(0.0,) * column_count,
+        integrality=(1,) * column_count,
+        lower_bounds=(0.0,) * column_count,
+        upper_bounds=(1.0,) * column_count,
+        rows=rows,
+        solver_runner=inspect_runner,
+    )
+
+    result = solve_binary_milp(
+        objective=(0.0,),
+        integrality=(1,),
+        lower_bounds=(0.0,),
+        upper_bounds=(1.0,),
+        rows=[({}, 0.0, 0.0)],
+        solver_runner=lambda **kwargs: SimpleNamespace(
+            status=0, message="empty row", fun=0.0, x=[0.0]
+        ),
+    )
+    assert result.optimal
 
 
 def test_failed_presolve_retry_retains_both_failures() -> None:
