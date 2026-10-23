@@ -461,12 +461,19 @@ def test_mip_result_separates_primal_dual_and_records_presolve_retry() -> None:
     assert options_seen[1]["presolve"] is False
 
 
-def test_mip_passes_sparse_constraints_without_changing_coefficients_or_bounds() -> None:
+def test_mip_passes_sparse_constraints_without_changing_coefficients_or_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rows = [
         ({0: 2.5, 3: -4.0}, -1.0, 7.0),
         ({1: 0.0, 2: -3.0}, 2.0, float("inf")),
         ({}, float("-inf"), 0.0),
     ]
+
+    def reject_post_conversion_write(_self, _key, _value) -> None:
+        raise AssertionError("CSR coefficients must come only from COO conversion")
+
+    monkeypatch.setattr(csr_matrix, "__setitem__", reject_post_conversion_write)
 
     def inspect_runner(**kwargs):
         constraint = kwargs["constraints"]
@@ -492,6 +499,9 @@ def test_mip_passes_sparse_constraints_without_changing_coefficients_or_bounds()
         solver_runner=inspect_runner,
     )
     assert result.optimal
+    assert result.coo_assembly_seconds >= 0.0
+    assert result.coo_to_csr_seconds >= 0.0
+    assert result.solver_input_preparation_seconds >= 0.0
 
 
 def test_sparse_mip_assembly_scales_with_nonzeros_and_handles_empty_model() -> None:
