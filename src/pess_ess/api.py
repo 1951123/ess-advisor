@@ -8,11 +8,14 @@ from typing import Any, Literal
 
 import scipy
 
+from .exact_enumeration import ExactEnumerationResult, solve_exact_enumeration
 from .model import Instance, instance_from_dict
 from .nominal import solve_nominal
 from .solvers import OuterResult, solve_master_oracle, solve_static
 
-Backend = Literal["master_oracle", "static", "fixed_priority_milp"]
+Backend = Literal[
+    "master_oracle", "static", "fixed_priority_milp", "exact_enumeration"
+]
 SCHEMA_VERSION = "1"
 
 
@@ -27,8 +30,8 @@ def solve(
     total_time_limit: float | None = None,
     precompute_invariants: bool = False,
     task_local_cache: bool = False,
-) -> OuterResult:
-    """Solve a supported structured ESS objective using conventional MILPs.
+) -> OuterResult | ExactEnumerationResult:
+    """Solve a supported structured ESS objective using the selected backend.
 
     PESS defaults to Master--Oracle, which does not enumerate outer resource
     sets. Nominal uses a complete fixed candidate-priority order shared by all
@@ -38,10 +41,18 @@ def solve(
         raise ValueError("objective must be 'pess' or 'nominal'")
     if backend is None:
         backend = "fixed_priority_milp" if objective == "nominal" else "master_oracle"
-    if objective == "pess" and backend not in {"master_oracle", "static"}:
-        raise ValueError("PESS backend must be 'master_oracle' or 'static'")
-    if objective == "nominal" and backend != "fixed_priority_milp":
-        raise ValueError("Nominal backend must be 'fixed_priority_milp'")
+    if objective == "pess" and backend not in {
+        "master_oracle", "static", "exact_enumeration"
+    }:
+        raise ValueError(
+            "PESS backend must be 'master_oracle', 'static', or 'exact_enumeration'"
+        )
+    if objective == "nominal" and backend not in {
+        "fixed_priority_milp", "exact_enumeration"
+    }:
+        raise ValueError(
+            "Nominal backend must be 'fixed_priority_milp' or 'exact_enumeration'"
+        )
     for name, limit in (
         ("time_limit", time_limit),
         ("inner_time_limit", inner_time_limit),
@@ -54,6 +65,20 @@ def solve(
             or limit < 0
         ):
             raise ValueError(f"{name} must be a finite nonnegative number")
+    if backend == "exact_enumeration":
+        if (
+            time_limit is not None
+            or inner_time_limit is not None
+            or precompute_invariants
+            or task_local_cache
+        ):
+            raise ValueError("exact_enumeration supports only total_time_limit")
+        return solve_exact_enumeration(
+            instance,
+            objective=objective,
+            priority_order=tuple(priority_order) if priority_order is not None else None,
+            time_limit=total_time_limit,
+        )
     if backend == "static":
         if inner_time_limit is not None:
             raise ValueError("inner_time_limit is supported only by master_oracle")
@@ -119,7 +144,7 @@ def _solver_status(item: Any) -> dict[str, Any]:
 
 
 def result_to_dict(
-    result: OuterResult,
+    result: OuterResult | ExactEnumerationResult,
     *,
     backend: Backend,
     objective: str = "pess",
@@ -128,6 +153,69 @@ def result_to_dict(
     """Serialize validated objective evidence, numerical status, and provenance."""
     if objective not in {"pess", "nominal"}:
         raise ValueError("objective must be 'pess' or 'nominal'")
+    if isinstance(result, ExactEnumerationResult):
+        if backend != "exact_enumeration":
+            raise ValueError("exact enumeration result requires exact_enumeration backend")
+        if objective == "nominal" and priority_order is None:
+            raise ValueError("Nominal result is missing its priority order")
+        canonical = result.optimal_sets[0] if result.optimal_sets else None
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "objective": objective,
+            "backend": backend,
+            "status": "optimal" if result.complete else "interrupted",
+            "termination_reason": "complete_enumeration" if result.complete else "time_limit",
+            "feasibility": "feasible" if canonical is not None else "not_validated",
+            "optimality": {
+                "solver_reported_optimal": False,
+                "kind": "exact_fraction_enumeration" if result.complete else "incomplete_search",
+                "outer_global_optimum_fraction_certified": result.complete,
+            },
+            "incumbent": {
+                "available": canonical is not None,
+                "validated_feasible": canonical is not None,
+                "selected": sorted(canonical) if canonical is not None else None,
+                "objective_value": str(result.objective) if result.objective is not None else None,
+            },
+            "exact_enumeration": {
+                "objective_fraction": str(result.objective) if result.objective is not None else None,
+                **(
+                    {"optimal_sets": [sorted(item) for item in result.optimal_sets]}
+                    if result.complete
+                    else {"best_known_sets": [sorted(item) for item in result.optimal_sets]}
+                ),
+                "canonical_representative": sorted(canonical) if canonical is not None else None,
+                "evaluated_subsets": result.evaluated_subsets,
+                "feasible_subsets": result.feasible_subsets,
+                "pruned_branches": result.pruned_branches,
+                "complete": result.complete,
+                "elapsed_seconds": result.elapsed_seconds,
+            },
+            "objective_evidence": {
+                "basis": "exact_outer_subset_enumeration",
+                "task_wise_pess_maximal_matching": objective == "pess",
+                "fixed_global_priority_replay": objective == "nominal",
+                "fraction_arithmetic": True,
+                "outer_global_optimum_fraction_certified": result.complete,
+            },
+            **(
+                {
+                    "policy": {
+                        "kind": "fixed_global_candidate_priority_greedy",
+                        "priority_order": list(priority_order or ()),
+                    }
+                }
+                if objective == "nominal"
+                else {}
+            ),
+            "solver_statuses": [],
+            "wall_time_seconds": result.elapsed_seconds,
+            "provenance": {
+                "package": "pess-ess",
+                "package_version": _package_version(),
+                "backend_solver": None,
+            },
+        }
     selected = sorted(result.selected) if result.selected is not None else None
     selected_nominal_value_certified = bool(
         objective == "nominal"

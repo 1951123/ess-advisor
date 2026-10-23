@@ -48,8 +48,16 @@ subsets. It adds conditional scenario cuts as needed and invokes the task
 oracle, which may use Fraction-certified bounds or a floating-point MILP.
 `backend="static"` builds the full conditional formulation by
 enumerating task matching scenarios; use it only when those families are
-tractable. The exhaustive Fraction reference (`solve_exhaustive`) is for small
-differential checks, not production selection.
+tractable. `backend="exact_enumeration"` explicitly enumerates budget-feasible
+outer resource sets and uses exact rational arithmetic. Nonnegative additive
+costs allow pruning a partial set once its cost exceeds the budget; zero-cost
+resources remain eligible. Nominal requires the complete frozen priority order.
+The backend returns every exact minimizing set on completion and labels a
+timed-out search as interrupted with only its best-known feasible result. It
+does not report MILP statuses, bounds, or gaps. The independent
+`solve_exhaustive` / `solve_nominal_exhaustive` routines remain the small-instance
+differential references. Exact enumeration remains exponential in the worst
+case, and does not replace the default MILP backends.
 
 Supported keyword options are `time_limit` (per MILP call), `inner_time_limit`
 (per inner task oracle; master-oracle only), `total_time_limit` (global wall
@@ -138,6 +146,18 @@ For Nominal, use `"objective": "nominal"`, omit `backend` (it defaults to
 `incumbent.objective_value` and Fraction-certified incumbent upper bound are
 recomputed by exact rational replay of that policy. The outer optimality
 status and lower bound remain floating-point solver reports.
+
+For exact outer enumeration, set `"backend": "exact_enumeration"` and use
+`limits.total_time_seconds` as its wall-clock limit. The response reports
+`exact_enumeration.complete`, exact `objective_fraction`, all `optimal_sets`
+when complete, and the deterministic first set as `canonical_representative`.
+When interrupted, it reports `best_known_sets` and makes no global-optimum
+claim. `evaluated_subsets` counts complete objective evaluations;
+`feasible_subsets` counts feasible leaves reached, including a leaf whose
+objective evaluation was interrupted. `pruned_branches` counts budget-infeasible
+recursion nodes, not the number of omitted subsets. The existing `static`
+backend still means matching-scenario MILP; it is distinct from outer resource
+enumeration.
 
 Rational values may be JSON strings such as `"-3/2"`, integers, or finite
 decimals; they are parsed as exact `Fraction` model inputs. Omit unsupported
