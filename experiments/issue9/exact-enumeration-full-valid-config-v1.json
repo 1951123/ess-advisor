@@ -1,0 +1,85 @@
+{
+  "format": "ess-advisor-issue9-exact-enumeration-full-valid-v1",
+  "status": "completed",
+  "question": "Does exact outer resource-subset enumeration reproduce the archived exact Nominal and task-wise PESS optima and complete tie sets on the frozen valid-only Forest10 and Census13 models at B=2/3?",
+  "authorization": "The researcher explicitly authorized exact enumeration of the full benchmark on 2026-10-23; the earlier Issue #9 prohibition on large solver runs was scoped to the prior unapproved state.",
+  "software": {
+    "advisor_repository": "1951123/ess-advisor",
+    "advisor_source_commit": "d28756e71d28484add4f287dec244b0814e1126c",
+    "research_repository": "1951123/ess-research",
+    "research_source_commit": "5b3907ff4102c096ed1510959dc769c5d4549b12",
+    "protocol_sha256": "57ba752c16dc188e4d24ef24a758590281a5f77c0418cd5911038a8d2a50af60",
+    "stage1_adapter_commit": "6c0d82d258faaa817f2bc977ff99b04971550aa0",
+    "advisor_schema_version": "1",
+    "package": "pess-ess 0.1.0",
+    "python": "3.12.3",
+    "numpy": "2.5.4",
+    "scipy": "1.18.1",
+    "networkx": "3.7",
+    "runner": "experiments/issue9/run_exact_enumeration_full_valid.py",
+    "executed_runner_sha256": "f3b12c4cb629d7a71a237b26a4c89e32fcfa49f64dfab21ca470ecc2df2414f6",
+    "retained_runner_sha256": "e9910e76d5ce1acb420e86382206fb994f253e902ca786445c469695f85b6606"
+  },
+  "environment": {
+    "architecture": "x86_64",
+    "cpu": "Intel Core i7-14650HX",
+    "logical_cpus": 12,
+    "parallel_cases": 1,
+    "random_seed": null
+  },
+  "inputs": {
+    "forest10": {
+      "model_version": "forest10-positive-preclamp-v1",
+      "tasks": 10000,
+      "candidates": 45,
+      "cost_proxy": "unit cost; cardinality budget",
+      "frozen_selection_sha256": "10bcf1f6026aa4de025cbef360c8302aafb2f082d49138c4c5da2d1331f4c798",
+      "coefficient_artifact_sha256": "b1f0e6521804cc0e77f0616271d94b10a3602bde6eb677591ee040e14c7dbd04",
+      "valid_truth_sha256": "fc301ee43eac7dd1f3d381f0d0c8ad6bb4534dca6c1005719d703c18956c7d90",
+      "arecel_archive_sha256": "5cd33cba7f3d7182ef497e60e7346fb2a7546941590a90a4444913a944958f79"
+    },
+    "census13": {
+      "model_version": "census13-clamped-log-v2",
+      "tasks": 10000,
+      "candidates": 78,
+      "cost_proxy": "unit cost; cardinality budget",
+      "frozen_selection_sha256": "7c4e0abeaff84a147c80a77a6d854df12950600cf2139a4fc661c21e140ff7a7",
+      "plan_sha256": "51842c6981936d9a5be39342eb5caee23b35f3137e5876064b0b1a649906d5e1",
+      "coefficient_digest": "7671c4d8837c4f63423bb4a0cf1a132923301ef4f6d04cdf5ee380dfe6cbc0a5",
+      "valid_truth_sha256": "2b88019f55b3e1ba172c5851e8c6adfb0f37ad878386e244e83d6fa3046ba28d",
+      "worker0_observations_sha256": "3dccb9675648f1475bb098ecc8288b2b61bf8f4c13cdaee87a6ca276c8937602",
+      "worker1_observations_sha256": "341cebd27650cf34608073a4712b71fd1c4a26cc6338d581c1d1e01117ef88e4",
+      "coverage_sha256": "ce33ae7a290686b18b9ac14ca628b24827210257b501bedc2ddf49408ac14f7d",
+      "arecel_archive_sha256": "5cd33cba7f3d7182ef497e60e7346fb2a7546941590a90a4444913a944958f79"
+    }
+  },
+  "cases": [
+    "forest10-nominal-b2",
+    "forest10-pess-b2",
+    "forest10-nominal-b3",
+    "forest10-pess-b3",
+    "census13-nominal-b2",
+    "census13-pess-b2",
+    "census13-nominal-b3",
+    "census13-pess-b3"
+  ],
+  "limits": {
+    "api_total_time_seconds": 895,
+    "outer_timeout_seconds": 910,
+    "address_space_limit_bytes": 12884901888,
+    "enforcement": "one case at a time; GNU timeout; Bash RLIMIT_AS via ulimit -v; /usr/bin/time -v records wall time and peak RSS",
+    "retry_count": 0,
+    "first_failure_policy": "stop the sequence on input mismatch, interrupted enumeration, or frozen objective/tie contradiction"
+  },
+  "postgresql": {
+    "executed_during_enumeration": false,
+    "census13_frozen_observations_source_version": "PostgreSQL 16.14",
+    "forest10": "precomputed exact model coefficients from the pinned Research artifact; no PostgreSQL execution in this benchmark"
+  },
+  "comparison": {
+    "frozen_reference_source": "ess-research experiments/solver-integration-issue74/stage2-b23-protocol-v1.json",
+    "pass_rule": "complete exact enumeration; exact Fraction objective and all tie sets equal the archived reference; all 10000 tasks and complete candidate universe accepted",
+    "historical_highs_case": "Forest10 Nominal B2 from the Issue #74 recovery attempt; comparison is descriptive only because solver and timing boundaries differ"
+  },
+  "runtime_artifacts": "$ESS_RUNTIME_PARENT/ess-advisor/issue9/runs/exact-enumeration-20261023/"
+}
