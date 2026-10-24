@@ -1,0 +1,31 @@
+{
+  "schema_version": "1",
+  "objective": "nominal",
+  "backend": "add_only_greedy",
+  "priority_order": ["m-resource", "z-resource", "a-resource"],
+  "limits": {
+    "total_time_seconds": 10,
+    "max_evaluations": 100
+  },
+  "input_provenance": {
+    "model_version": "synthetic-add-only-greedy-example-v1"
+  },
+  "instance": {
+    "budget": "3",
+    "candidates": [
+      {"id": "z-resource", "table": "t", "endpoints": ["e", "f"], "maintenance_cost": "1"},
+      {"id": "a-resource", "table": "t", "endpoints": ["a", "b"], "maintenance_cost": "1"},
+      {"id": "m-resource", "table": "t", "endpoints": ["c", "d"], "maintenance_cost": "1"}
+    ],
+    "tasks": [
+      {
+        "id": "q",
+        "table": "t",
+        "weight": "1",
+        "alpha": "-5",
+        "eligible_candidates": ["z-resource", "a-resource", "m-resource"],
+        "corrections": {"z-resource": "2", "a-resource": "3", "m-resource": "1"}
+      }
+    ]
+  }
+}

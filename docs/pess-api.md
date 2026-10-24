@@ -159,6 +159,68 @@ recursion nodes, not the number of omitted subsets. The existing `static`
 backend still means matching-scenario MILP; it is distinct from outer resource
 enumeration.
 
+## Add-only greedy backend
+
+Set `"backend": "add_only_greedy"` to use the same strict-improvement
+best-addition rule for either objective. It starts from the empty set, evaluates
+every remaining budget-feasible candidate with the exact Fraction reference,
+and adds the largest strictly positive improvement. Equal improvements use
+ascending candidate ID order. It stops at a plateau or when no remaining
+candidate is feasible; it does not force budget use. PESS can worsen when a
+resource is added, and this backend makes no local- or global-optimum claim.
+
+For Nominal, include the complete fixed global `priority_order`. For PESS,
+each fixed-set evaluation maximizes loss over all maximal matchings per task.
+An interrupted evaluation is discarded, and the current addition round is
+committed only after every feasible candidate in that round has an exact
+value. The returned status is `heuristic_completed` or
+`heuristic_incomplete`, never `optimal`.
+
+The shared `total_time_seconds` limit applies to both objectives.
+`max_evaluations` caps fixed-set evaluations, including the initial empty-set
+value. PESS may also use `max_inner_matching_subsets`, a cumulative cap on
+matching-subset checks in its exact reference evaluations. The response
+separates outer `candidate_attempts`, `fixed_set_evaluation_calls`, completed
+evaluations, inner PESS subset checks and maximal matchings scored, and wall
+time. Numerical solver limits and Master--Oracle options do not apply to this
+backend.
+
+The small synthetic CLI requests are checked in at
+[`docs/examples/add-only-greedy-pess.json`](examples/add-only-greedy-pess.json)
+and [`docs/examples/add-only-greedy-nominal.json`](examples/add-only-greedy-nominal.json):
+
+```sh
+.venv/bin/pess-ess-solve docs/examples/add-only-greedy-pess.json
+.venv/bin/pess-ess-solve docs/examples/add-only-greedy-nominal.json
+```
+
+Both examples use the same three disjoint synthetic resources and produce the
+addition order `a-resource`, `z-resource`, objective `0`, maintenance cost `2`
+under budget `3`, and stopping reason `no_strict_improvement`. They are API
+smoke examples only; their coefficients are not benchmark or PostgreSQL
+measurements.
+
+### Observed synthetic execution
+
+**Experimentally observed, model-only:** Python 3.12.3, `pess-ess` 0.1.0,
+implementation commit
+[`e454ad431819f2c95289dfbbc79b1572aac8761a`](https://github.com/1951123/ess-advisor/commit/e454ad431819f2c95289dfbbc79b1572aac8761a).
+The two checked-in JSON requests above are the complete deterministic inputs;
+no random seed or external dataset is used. Both were run with the documented
+CLI commands. PESS returned `heuristic_completed`, objective `0`, selected
+`[a-resource, z-resource]`, maintenance cost `2`, unused budget `1`, 7 fixed-set
+evaluation calls, 23 matching-subset checks and 7 maximal matchings scored. The
+Nominal request returned the same selection and objective, with 7 fixed-set
+calls and zero inner matching work. The observed wall times were 0.000168 s
+(PESS) and 0.000091 s (Nominal); these single-run timings are not a performance
+comparison. The plateau test also records a synthetic greedy objective of `1`
+versus exact global objective `0` for a two-resource combination; this is a
+counterexample to any global-optimality claim, not a performance result.
+
+This smoke run checks API execution and accounting only. It provides no
+evidence of Nominal–PESS separation, PostgreSQL behavior, or benchmark
+generalization.
+
 Rational values may be JSON strings such as `"-3/2"`, integers, or finite
 decimals; they are parsed as exact `Fraction` model inputs. Omit unsupported
 `limits` or `options` fields. The result includes `selected`, recomputed
