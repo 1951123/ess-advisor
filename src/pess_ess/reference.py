@@ -5,16 +5,40 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
+from time import monotonic
 
 from .model import Instance, Task
+
+
+class ReferenceEvaluationIncomplete(TimeoutError):
+    """An exact reference evaluation stopped before producing a value."""
+
+
+@dataclass
+class ReferenceWork:
+    """Optional work counters for exact PESS reference evaluations."""
+
+    matching_subsets_examined: int = 0
+    maximal_matchings_scored: int = 0
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic() >= deadline:
+        raise ReferenceEvaluationIncomplete("total_time_limit")
 
 
 def _reference_matchings(
     candidate_ids: tuple[str, ...],
     endpoints: dict[str, tuple[str, str]],
+    *,
+    deadline: float | None = None,
+    work: ReferenceWork | None = None,
 ) -> tuple[frozenset[str], ...]:
     result: list[frozenset[str]] = []
     for mask in range(1 << len(candidate_ids)):
+        _check_deadline(deadline)
+        if work is not None:
+            work.matching_subsets_examined += 1
         chosen = frozenset(
             candidate_ids[index]
             for index in range(len(candidate_ids))
@@ -56,7 +80,11 @@ def reference_task_loss(
     instance: Instance,
     task: Task,
     selected: frozenset[str],
+    *,
+    deadline: float | None = None,
+    work: ReferenceWork | None = None,
 ) -> tuple[Fraction, frozenset[str]]:
+    _check_deadline(deadline)
     candidate_map = instance.candidate_map
     selected_eligible = frozenset(
         candidate_id
@@ -67,20 +95,28 @@ def reference_task_loss(
         candidate_id: candidate_map[candidate_id].endpoints
         for candidate_id in task.eligible_candidates
     }
-    maximal = [
-        matching
-        for matching in _reference_matchings(tuple(sorted(selected_eligible)), endpoints)
-        if _reference_maximal(matching, selected_eligible, endpoints)
-    ]
+    matchings = _reference_matchings(
+        tuple(sorted(selected_eligible)),
+        endpoints,
+        deadline=deadline,
+        work=work,
+    )
+    maximal = []
+    for matching in matchings:
+        _check_deadline(deadline)
+        if _reference_maximal(matching, selected_eligible, endpoints):
+            maximal.append(matching)
     if not maximal:
         raise AssertionError("finite selected graph has no maximal matching")
-    losses = {
-        matching: abs(
+    losses = {}
+    for matching in maximal:
+        _check_deadline(deadline)
+        losses[matching] = abs(
             task.alpha
             + sum((task.corrections[item] for item in matching), Fraction())
         )
-        for matching in maximal
-    }
+        if work is not None:
+            work.maximal_matchings_scored += 1
     value = max(losses.values())
     witness = min(
         (matching for matching, loss in losses.items() if loss == value),
@@ -92,15 +128,19 @@ def reference_task_loss(
 def reference_objective(
     instance: Instance,
     selected: frozenset[str],
+    *,
+    deadline: float | None = None,
+    work: ReferenceWork | None = None,
 ) -> tuple[Fraction, dict[str, tuple[Fraction, frozenset[str]]]]:
-    details = {
-        task.id: reference_task_loss(instance, task, selected)
-        for task in instance.tasks
-    }
-    objective = sum(
-        (task.weight * details[task.id][0] for task in instance.tasks),
-        Fraction(),
-    )
+    details = {}
+    objective = Fraction()
+    for task in instance.tasks:
+        _check_deadline(deadline)
+        details[task.id] = reference_task_loss(
+            instance, task, selected, deadline=deadline, work=work
+        )
+        objective += task.weight * details[task.id][0]
+    _check_deadline(deadline)
     return objective, details
 
 
@@ -109,6 +149,8 @@ def reference_nominal_task_loss(
     task: Task,
     selected: frozenset[str],
     priority_order: tuple[str, ...],
+    *,
+    deadline: float | None = None,
 ) -> tuple[Fraction, frozenset[str]]:
     """Independent exact replay of a fixed global-priority greedy policy."""
     candidate_map = instance.candidate_map
@@ -116,6 +158,7 @@ def reference_nominal_task_loss(
     occupied: set[str] = set()
     matching: set[str] = set()
     for candidate_id in priority_order:
+        _check_deadline(deadline)
         if candidate_id not in selected or candidate_id not in eligible:
             continue
         endpoints = candidate_map[candidate_id].endpoints
@@ -135,16 +178,18 @@ def reference_nominal_objective(
     instance: Instance,
     selected: frozenset[str],
     priority_order: tuple[str, ...],
+    *,
+    deadline: float | None = None,
 ) -> tuple[Fraction, dict[str, tuple[Fraction, frozenset[str]]]]:
-    details = {
-        task.id: reference_nominal_task_loss(
-            instance, task, selected, priority_order
+    details = {}
+    objective = Fraction()
+    for task in instance.tasks:
+        _check_deadline(deadline)
+        details[task.id] = reference_nominal_task_loss(
+            instance, task, selected, priority_order, deadline=deadline
         )
-        for task in instance.tasks
-    }
-    objective = sum(
-        (task.weight * details[task.id][0] for task in instance.tasks), Fraction()
-    )
+        objective += task.weight * details[task.id][0]
+    _check_deadline(deadline)
     return objective, details
 
 

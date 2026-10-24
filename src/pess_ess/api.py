@@ -9,12 +9,17 @@ from typing import Any, Literal
 import scipy
 
 from .exact_enumeration import ExactEnumerationResult, solve_exact_enumeration
+from .greedy import AddOnlyGreedyResult, solve_add_only_greedy
 from .model import Instance, instance_from_dict
 from .nominal import solve_nominal
 from .solvers import OuterResult, solve_master_oracle, solve_static
 
 Backend = Literal[
-    "master_oracle", "static", "fixed_priority_milp", "exact_enumeration"
+    "master_oracle",
+    "static",
+    "fixed_priority_milp",
+    "exact_enumeration",
+    "add_only_greedy",
 ]
 SCHEMA_VERSION = "1"
 
@@ -30,28 +35,34 @@ def solve(
     total_time_limit: float | None = None,
     precompute_invariants: bool = False,
     task_local_cache: bool = False,
-) -> OuterResult | ExactEnumerationResult:
+    max_evaluations: int | None = None,
+    max_inner_matching_subsets: int | None = None,
+) -> OuterResult | ExactEnumerationResult | AddOnlyGreedyResult:
     """Solve a supported structured ESS objective using the selected backend.
 
     PESS defaults to Master--Oracle, which does not enumerate outer resource
     sets. Nominal uses a complete fixed candidate-priority order shared by all
-    tasks and a direct deterministic-policy MILP.
+    tasks and a direct deterministic-policy MILP. The explicitly selected
+    add_only_greedy backend uses exact Fraction fixed-set objective replays for
+    both objectives and never claims global optimality.
     """
     if objective not in {"pess", "nominal"}:
         raise ValueError("objective must be 'pess' or 'nominal'")
     if backend is None:
         backend = "fixed_priority_milp" if objective == "nominal" else "master_oracle"
     if objective == "pess" and backend not in {
-        "master_oracle", "static", "exact_enumeration"
+        "master_oracle", "static", "exact_enumeration", "add_only_greedy"
     }:
         raise ValueError(
-            "PESS backend must be 'master_oracle', 'static', or 'exact_enumeration'"
+            "PESS backend must be 'master_oracle', 'static', 'exact_enumeration', "
+            "or 'add_only_greedy'"
         )
     if objective == "nominal" and backend not in {
-        "fixed_priority_milp", "exact_enumeration"
+        "fixed_priority_milp", "exact_enumeration", "add_only_greedy"
     }:
         raise ValueError(
-            "Nominal backend must be 'fixed_priority_milp' or 'exact_enumeration'"
+            "Nominal backend must be 'fixed_priority_milp', 'exact_enumeration', "
+            "or 'add_only_greedy'"
         )
     for name, limit in (
         ("time_limit", time_limit),
@@ -65,6 +76,36 @@ def solve(
             or limit < 0
         ):
             raise ValueError(f"{name} must be a finite nonnegative number")
+    for name, limit in (
+        ("max_evaluations", max_evaluations),
+        ("max_inner_matching_subsets", max_inner_matching_subsets),
+    ):
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError(f"{name} must be a nonnegative integer")
+    if backend != "add_only_greedy" and (
+        max_evaluations is not None or max_inner_matching_subsets is not None
+    ):
+        raise ValueError("greedy evaluation limits require backend='add_only_greedy'")
+    if backend == "add_only_greedy":
+        if (
+            time_limit is not None
+            or inner_time_limit is not None
+            or precompute_invariants
+            or task_local_cache
+        ):
+            raise ValueError(
+                "add_only_greedy supports total_time_limit and greedy evaluation limits only"
+            )
+        return solve_add_only_greedy(
+            instance,
+            objective=objective,
+            priority_order=priority_order,
+            total_time_limit=total_time_limit,
+            max_evaluations=max_evaluations,
+            max_inner_matching_subsets=max_inner_matching_subsets,
+        )
     if backend == "exact_enumeration":
         if (
             time_limit is not None
@@ -144,7 +185,7 @@ def _solver_status(item: Any) -> dict[str, Any]:
 
 
 def result_to_dict(
-    result: OuterResult | ExactEnumerationResult,
+    result: OuterResult | ExactEnumerationResult | AddOnlyGreedyResult,
     *,
     backend: Backend,
     objective: str = "pess",
@@ -153,6 +194,98 @@ def result_to_dict(
     """Serialize validated objective evidence, numerical status, and provenance."""
     if objective not in {"pess", "nominal"}:
         raise ValueError("objective must be 'pess' or 'nominal'")
+    if isinstance(result, AddOnlyGreedyResult):
+        if backend != "add_only_greedy":
+            raise ValueError("add-only greedy result requires add_only_greedy backend")
+        if objective == "nominal":
+            if result.priority_order is None:
+                raise ValueError("Nominal result is missing its priority order")
+            if priority_order is not None and tuple(priority_order) != result.priority_order:
+                raise ValueError("priority_order does not match the solved Nominal policy")
+            priority_order = result.priority_order
+        elif priority_order is not None:
+            raise ValueError("priority_order is supported only by objective='nominal'")
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "objective": objective,
+            "backend": backend,
+            "status": result.status,
+            "termination_reason": result.termination_reason,
+            "termination_detail": result.termination_detail,
+            "feasibility": "feasible",
+            "incumbent": {
+                "available": True,
+                "validated_feasible": True,
+                "selected": sorted(result.selected),
+                "budget": str(result.budget),
+                "maintenance_cost": str(result.maintenance_cost),
+                "unused_budget": str(result.unused_budget),
+                "objective_value": (
+                    str(result.objective) if result.objective is not None else None
+                ),
+            },
+            "optimality": {
+                "solver_reported_optimal": False,
+                "kind": "add_only_greedy_heuristic",
+                "outer_global_optimum_fraction_certified": False,
+            },
+            "objective_evidence": {
+                "basis": (
+                    "all_task_maximal_matchings_fraction_reference"
+                    if objective == "pess"
+                    else "fixed_global_priority_fraction_replay"
+                ),
+                "fraction_arithmetic": True,
+                "selected_objective_fraction_certified": result.objective is not None,
+                "all_accepted_marginal_improvements_positive_and_fraction_exact": True,
+            },
+            "greedy": {
+                "addition_order": list(result.addition_order),
+                "steps": [
+                    {
+                        "candidate_id": step.candidate_id,
+                        "objective_before": str(step.objective_before),
+                        "objective_after": str(step.objective_after),
+                        "improvement": str(step.improvement),
+                    }
+                    for step in result.steps
+                ],
+                "tie_break_rule": "ascending_candidate_id",
+                "candidate_attempts": result.candidate_attempts,
+                "fixed_set_evaluation_calls": result.fixed_set_evaluation_calls,
+                "completed_fixed_set_evaluations": (
+                    result.completed_fixed_set_evaluations
+                ),
+                "inner_oracle_work": {
+                    "matching_subsets_examined": (
+                        result.inner_matching_subsets_examined
+                    ),
+                    "maximal_matchings_scored": (
+                        result.inner_maximal_matchings_scored
+                    ),
+                },
+            },
+            **(
+                {
+                    "policy": {
+                        "kind": "fixed_global_candidate_priority_greedy",
+                        "priority_order": list(priority_order or ()),
+                    }
+                }
+                if objective == "nominal"
+                else {}
+            ),
+            "solver_statuses": [],
+            "wall_time_seconds": result.elapsed_seconds,
+            "provenance": {
+                "package": "pess-ess",
+                "package_version": _package_version(),
+                "backend_solver": None,
+                "maintenance_cost_model": "nonnegative_additive_per_resource_proxy",
+                "fraction_reference": True,
+                "candidate_tie_break": "ascending_candidate_id",
+            },
+        }
     if isinstance(result, ExactEnumerationResult):
         if backend != "exact_enumeration":
             raise ValueError("exact enumeration result requires exact_enumeration backend")
@@ -385,6 +518,8 @@ def solve_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "time_seconds",
         "inner_time_seconds",
         "total_time_seconds",
+        "max_evaluations",
+        "max_inner_matching_subsets",
     }
     supported_options = {"precompute_invariants", "task_local_cache"}
     if set(limits) - supported_limits:
@@ -406,6 +541,8 @@ def solve_payload(payload: dict[str, Any]) -> dict[str, Any]:
         total_time_limit=limits.get("total_time_seconds"),
         precompute_invariants=options.get("precompute_invariants", False),
         task_local_cache=options.get("task_local_cache", False),
+        max_evaluations=limits.get("max_evaluations"),
+        max_inner_matching_subsets=limits.get("max_inner_matching_subsets"),
     )
     resolved_backend: Backend = backend or (
         "fixed_priority_milp" if objective == "nominal" else "master_oracle"

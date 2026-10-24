@@ -1,6 +1,7 @@
 """Synthetic PESS-ESS mathematical model and exact small-instance solvers."""
 
 from .api import result_to_dict, solve, solve_payload
+from .greedy import AddOnlyGreedyResult, GreedyStep
 from .model import Candidate, Instance, Task, read_instance, write_instance
 from .nominal import solve_nominal
 from .oracle import (
@@ -13,7 +14,9 @@ from .reference import ReferenceResult, solve_exhaustive
 from .solvers import OuterResult, solve_master_oracle, solve_static
 
 __all__ = [
+    "AddOnlyGreedyResult",
     "Candidate",
+    "GreedyStep",
     "InnerBounds",
     "InnerOracleResult",
     "Instance",
