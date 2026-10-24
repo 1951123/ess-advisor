@@ -19,6 +19,12 @@ Applies only to `1951123/ess-advisor`. This repository independently owns adviso
 - Keep each PR Draft until researcher review; no autonomous merge or destructive worktree cleanup.
 
 
+## Task-scoped autonomy and minimal engineering
+
+Once a researcher approves a bounded advisor task or experiment, Codex may independently implement, test, debug, run on a clean committed development branch and retry engineering failures **within the approved scientific scope and resource limits**. Do not require a fresh PR review or permission after each ordinary failure. Keep attempts distinguishable, retain essential failure evidence, and never present incomplete evaluations as certified. Respect any explicitly one-shot or narrower authorization.
+
+Use the smallest code that answers the current question. Do not add generic frameworks, wrappers, validators, gates or archives to prevent merely hypothetical engineering problems. A blocking review comment must identify an observed defect or a demonstrable threat to correctness, evidence integrity, safety or immutable inputs; speculative improvements are nonblocking. Escalate only when changing the scientific problem, input distribution, claims, computational envelope, potentially destructive data operations, or when a genuinely hard failure remains unresolved after reasonable diagnosis. The researcher still approves out-of-scope experiments and merges; approved experiments need not wait for the development PR to merge.
+
 ## Mandatory isolation and durable evidence
 
 **Only original inputs in `ESS_DATA_ROOT` are shared data.** Every Issue has its own development Worktree and own `.venv`; do not import installed packages or derived outputs from another Issue's environment. Any PG-backed experiment builds its own pinned PostgreSQL source/binaries and owns a separate PGDATA and sample; even an identical PG commit is rebuilt rather than borrowed from another experiment. Keep generated files, temporary outputs and test scratch under an owned path in `ESS_RUNTIME_PARENT/ess-advisor/issue<N>/runs/<run-id>/`; do not silently emit them under the main checkout or the source Worktree. Inspect ignored files as well as `git status` before handoff. Codex is responsible for its own build/test debris and may not remove other tasks' files.
